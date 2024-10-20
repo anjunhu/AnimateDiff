@@ -1,4 +1,5 @@
 import os
+import re
 import math
 import wandb
 import random
@@ -431,7 +432,7 @@ def main(
                 height = train_data.sample_size[0] if not isinstance(train_data.sample_size, int) else train_data.sample_size
                 width  = train_data.sample_size[1] if not isinstance(train_data.sample_size, int) else train_data.sample_size
 
-                prompts = validation_data.prompts[:2] if global_step < 1000 and (not image_finetune) else validation_data.prompts
+                prompts = validation_data.prompts[:] if global_step < 1000 and (not image_finetune) else validation_data.prompts
 
                 for idx, prompt in enumerate(prompts):
                     if not image_finetune:
@@ -443,7 +444,8 @@ def main(
                             width        = width,
                             **validation_data,
                         ).videos
-                        save_videos_grid(sample, f"{output_dir}/samples/sample-{global_step}/{idx}.gif")
+                        fn = re.sub(r'\W', '_', prompt)
+                        save_videos_grid(sample, f"{output_dir}/samples/sample-{global_step}/{idx}_{fn}.gif")
                         samples.append(sample)
                         
                     else:

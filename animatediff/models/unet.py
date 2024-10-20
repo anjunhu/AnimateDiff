@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.utils.checkpoint
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-from diffusers.modeling_utils import ModelMixin
+from diffusers.models.modeling_utils import ModelMixin
 from diffusers.utils import BaseOutput, logging
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from .unet_blocks import (
@@ -23,6 +23,9 @@ from .unet_blocks import (
     UpBlock3D,
     get_down_block,
     get_up_block,
+)
+from diffusers.utils import (
+    _get_model_file,
 )
 from .resnet import InflatedConv3d, InflatedGroupNorm
 
@@ -477,8 +480,9 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
     @classmethod
     def from_pretrained_2d(cls, pretrained_model_name_or_path, unet_additional_kwargs={}, **kwargs):
         from diffusers import __version__
-        from diffusers.utils import DIFFUSERS_CACHE, SAFETENSORS_WEIGHTS_NAME, WEIGHTS_NAME, is_safetensors_available
-        from diffusers.modeling_utils import load_state_dict
+        from diffusers.utils import SAFETENSORS_WEIGHTS_NAME, WEIGHTS_NAME, is_safetensors_available
+        DIFFUSERS_CACHE = os.environ['DIFFUSERS_CACHE']
+        from diffusers.models.modeling_utils import load_state_dict
         print(f"loaded 3D unet's pretrained weights from {pretrained_model_name_or_path} ...")
 
         cache_dir = kwargs.pop("cache_dir", DIFFUSERS_CACHE)
@@ -500,12 +504,12 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         model_file = None
         if is_safetensors_available():
             try:
-                model_file = cls._get_model_file(
+                model_file = _get_model_file(
                     pretrained_model_name_or_path,
                     weights_name=SAFETENSORS_WEIGHTS_NAME,
                     cache_dir=cache_dir,
                     force_download=force_download,
-                    resume_download=resume_download,
+                    # resume_download=resume_download,
                     proxies=proxies,
                     local_files_only=local_files_only,
                     use_auth_token=use_auth_token,
@@ -517,12 +521,12 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                 pass
 
         if model_file is None:
-            model_file = cls._get_model_file(
+            model_file = _get_model_file(
                 pretrained_model_name_or_path,
                 weights_name=WEIGHTS_NAME,
                 cache_dir=cache_dir,
                 force_download=force_download,
-                resume_download=resume_download,
+                # resume_download=resume_download,
                 proxies=proxies,
                 local_files_only=local_files_only,
                 use_auth_token=use_auth_token,

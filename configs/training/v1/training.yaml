@@ -30,16 +30,62 @@ noise_scheduler_kwargs:
 train_data:
   csv_path:        "path_to_csv_file"
   video_folder:    "path_to_video_foler"
-  sample_size:     256
+  sample_size:     512
   sample_stride:   4
-  sample_n_frames: 16
+  sample_n_frames: 8
 
 validation_data:
   prompts:
-    - "Snow rocky mountains peaks canyon. Snow blanketed rocky mountains surround and shadow deep canyons."
-    - "A drone view of celebration with Christma tree and fireworks, starry sky - background."
-    - "Robot dancing in times square."
-    - "Pacific coast, carmel by the sea ocean and waves."
+    - "The No Limits Business Woman Podcast"
+    - "Full body U-Zip main opening - Full body U-Zip main opening on front of bag for easy unloading when you get to camp"
+    - "Mothers influence on her young hippo"
+    - "There's a <i>Mrs. Doubtfire</i> Sequel in the Works"
+    - "35 Possible Titles for the <i>Mrs. Doubtfire</i> Sequel"
+    - "Insights with Laura Powers"
+    - "The Happy Scientist"
+    - "Living in the Light with Ann Graham Lotz"
+    - "<i>I Am Chris Farley</i> Documentary Releases First Trailer"
+    - "<em>South Park: The Stick of Truth</em> Review (Multi-Platform)"
+    - "If Barbie Were The Face of The World's Most Famous Paintings"
+    - "Netflix Strikes Deal with AT&T for Faster Streaming"
+    # - "<i>X-Men: Days of Future Past</i> Director Joins Vince Gilligan's <i>Battle Creek</i> Pilot"
+    # - "As Punisher Joins <i>Daredevil</i> Season Two, Who Will the New Villain Be?"
+    # - "Aretha Franklin Files $10 Million Suit Over Patti LaBelle Fight Story On Satire Website"
+    # - "Hawkgirl Cast in <i>Arrow</i>/<i>Flash</i> Spinoff Series For The CW"
+    # - "Here's What You Need to Know About St. Vincent's Apple Music Radio Show"
+    # - "Daniel Radcliffe Dons a Beard and Saggy Jeans in Trailer for BBC GTA Miniseries <i>The Gamechangers</i>"
+    # - "The Health Mastery Café with Dr. Dave"
+    # - "'Listen to The Dead Weather''s New Song, \"Buzzkill(er)\"'"
+    # - "DC All Stars podcast"
+    # - "'Listen to The Dead Weather's New Song, \"Buzzkill(er)\"'"
+    # - "Rambo 5 und Rocky Spin-Off - Sylvester Stallone gibt Updates"
+    # - "Anna Kendrick is Writing a Collection of Funny, Personal Essays"
+    # - "Breaking Down the $12 in Your Six-Pack of Craft Beer"
+    # - "<i>It's Always Sunny</i> Gang Will Turn Your Life Around with Self-Help Book"
+    # - "Passion. Podcast. Profit."
+    # - "Prince Reunites With Warner Brothers, Plans New Album"
+    # - "Here's Who Ian McShane May Be Playing in <i>Game of Thrones</i> Season Six"
+    # - "Future Steve Carell Movie Set In North Korea Canceled By New Regency"
+    # - "Will Ferrell, John C. Reilly in Talks for <i>Border Guards</i>"
+    # - "25 Timeless <i>Golden Girls</i> Memes and Quotables"
+    # - "Long-Lost F. Scott Fitzgerald Story Rediscovered and Published, 76 Years Later"
+    # - "Watch the First Episode of <i>Garfunkel and Oates</i>"
+    # - "J Dilla's Synthesizers, Equipment Donated to Smithsonian Museum"
+    # - "<i>The Colbert Report</i> Gets End Date"
+    # - "Brit Marling-Zal Batmanglij Drama Series <i>The OA</i> Gets Picked Up By Netflix"
+    # - "Chris Messina In Talks to Star Alongside Ben Affleck in <i>Live By Night</i>"
+    # - "Sound Advice with John W Doyle"
+    # - "<i>The Long Dark</i> Gets First Trailer, Steam Early Access"
+    # - "Watch the Trailer for NBC's <i>Constantine</i>"
+    # - "Donna Tartt's <i>The Goldfinch</i> Scores Film Adaptation"
+    # - "Air Conditioners & Parts"
+    # - "Aaron Paul to Play Luke Skywalker at LACMA Reading of <i>The Empire Strikes Back</i>"
+    # - "Renegade RSS Laptop Backpack - View 21"
+    # - "Emma Watson to play Belle in Disney's <i>Beauty and the Beast</i>"
+    # - "George R.R. Martin Donates $10,000 to Wolf Sanctuary for a 13-Year-Old Fan"
+    # - "Director Danny Boyle Is Headed To TV With FX Deal"
+    # - "Axle Laptop Backpack - View 81"
+
   num_inference_steps: 25
   guidance_scale: 8.
 
@@ -49,14 +95,14 @@ trainable_modules:
 unet_checkpoint_path: ""
 
 learning_rate:    1.e-4
-train_batch_size: 4
+train_batch_size: 1
 
 max_train_epoch:      -1
-max_train_steps:      100
+max_train_steps:      100000
 checkpointing_epochs: -1
 checkpointing_steps:  60
 
-validation_steps:       5000
+validation_steps:       100
 validation_steps_tuple: [2, 50]
 
 global_seed: 42
