@@ -212,11 +212,11 @@ def main(
         zero_rank_print(f"trainable params scale: {sum(p.numel() for p in trainable_params) / 1e6:.3f} M")
 
     # Enable xformers
-    if enable_xformers_memory_efficient_attention:
-        if is_xformers_available():
-            unet.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError("xformers is not available. Make sure it is installed correctly")
+    # if enable_xformers_memory_efficient_attention:
+    #     if is_xformers_available():
+    #         unet.enable_xformers_memory_efficient_attention()
+    #     else:
+    #         raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     # Enable gradient checkpointing
     if gradient_checkpointing:
@@ -433,6 +433,7 @@ def main(
                 width  = train_data.sample_size[1] if not isinstance(train_data.sample_size, int) else train_data.sample_size
 
                 prompts = validation_data.prompts[:] if global_step < 1000 and (not image_finetune) else validation_data.prompts
+                prompts = train_dataset.get_unique_names() + prompts # check training caption memorisation
 
                 for idx, prompt in enumerate(prompts):
                     if not image_finetune:

@@ -10,25 +10,36 @@ import torchvision.transforms as transforms
 from torch.utils.data.dataset import Dataset
 from einops import rearrange
 from decord import VideoReader
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk, concatenate_datasets
 from animatediff.utils.util import zero_rank_print
 import requests
+from typing import List
 
 
 class WebVid10M(Dataset):
     def __init__(
             self,
-            csv_path=None, video_folder=None,
+            video_folders: List[str]=["/home/ubuntu/video/AnimateDiff/__assets__/filtered_webvid_datasets/filtered_webvid_dataset_3_Fire flames igniting and burni",
+                                    #   "/home/ubuntu/video/AnimateDiff/__assets__/filtered_webvid_datasets/filtered_webvid_dataset_1_Abstract background with beaut",
+                                      "/home/ubuntu/video/AnimateDiff/__assets__/filtered_webvid_datasets/filtered_webvid_dataset_2_Aluminium can. 3d render of me",
+                                      ],
             sample_size=256, sample_stride=4, sample_n_frames=16,
             is_image=False,
             split="train"
         ):
-        zero_rank_print(f"Loading dataset from Hugging Face ...")
-        
-        # Load dataset from Hugging Face
-        self.dataset = load_dataset("TempoFunk/webvid-10M", split=split)
-        self.length = len(self.dataset)
-        zero_rank_print(f"data scale: {self.length}")
+        if not video_folders:
+            print(f"Loading full dataset from Hugging Face ...")
+            # Load dataset from Hugging Face
+            self.dataset = load_dataset("TempoFunk/webvid-10M", split="train")
+            self.length = len(self.dataset)
+        else:
+            datasets = []
+            for folder in video_folders:
+                print(f"Loading dataset from {folder}...")
+                datasets.append(load_from_disk(folder))
+            self.dataset = concatenate_datasets(datasets)
+            self.length = len(self.dataset)
+        print(f"data length: {self.length}")
         
         self.sample_stride   = sample_stride
         self.sample_n_frames = sample_n_frames
@@ -41,12 +52,17 @@ class WebVid10M(Dataset):
             transforms.CenterCrop(sample_size),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
         ])
-
+        
+    def get_unique_names(self):
+        print("Collecting unique training prompts...")
+        names = [item['name'].strip() for item in self.dataset if 'name' in item]
+        unique_names = list(set(names))
+        return unique_names
+    
     def is_valid_video_link(self, contentUrl):
-        """Checks if the video URL is valid and reachable."""
         try:
             response = requests.head(contentUrl, timeout=5)
-            zero_rank_print(response)
+            # print(response)
             # Check if we get a valid response code
             return response.status_code == 200
         except requests.RequestException:
@@ -66,7 +82,7 @@ class WebVid10M(Dataset):
             video_frames = np.frombuffer(out, np.uint8).reshape([-1, height, width, 3])
             return video_frames
         except Exception as e:
-            zero_rank_print(f"Error fetching video: {e}")
+            print(f"Error fetching video: {e}")
             return None
         
     def get_batch(self, idx):
@@ -101,10 +117,10 @@ class WebVid10M(Dataset):
                 pixel_values, name = self.get_batch(idx)
                 break
             except ValueError as e:
-                zero_rank_print(f"Skipping video at index {idx}: {str(e)}")
+                print(f"Skipping video at index {idx}: {str(e)}")
                 idx = random.randint(0, self.length-1)
             except Exception as e:
-                zero_rank_print(f"Error processing video at index {idx}: {str(e)}")
+                print(f"Error processing video at index {idx}: {str(e)}")
                 idx = random.randint(0, self.length-1)
 
         # Apply transformations
@@ -117,13 +133,17 @@ if __name__ == "__main__":
     from animatediff.utils.util import save_videos_grid
 
     dataset = WebVid10M(
+        # video_folders=None, # None = full dataset
         sample_size=256,
         sample_stride=4, sample_n_frames=16,
         is_image=False,
         split="train"  # Specify the split (train, val, etc.)
     )
     
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, num_workers=16)
-    for idx, batch in enumerate(dataloader):
-        print(batch["pixel_values"].shape, len(batch["text"]))
+    unique_train_captions = dataset.get_unique_names()
+    print(len(unique_train_captions), unique_train_captions)
+    
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, num_workers=16)
+    # for idx, batch in enumerate(dataloader):
+    #     print(batch["pixel_values"].shape, len(batch["text"]))
         # Optionally save the videos using save_videos_grid
