@@ -182,3 +182,34 @@ def load_weights(
         animation_pipeline = load_diffusers_lora(animation_pipeline, motion_lora_state_dict, alpha)
 
     return animation_pipeline
+
+
+import requests
+import numpy as np
+import torch
+from io import BytesIO
+from torchvision import transforms
+from PIL import Image
+
+# Image downloader
+def download_image(url):
+    if not isinstance(url, str):
+        print(f"URL type is {type(url)} but should be string!")
+        return None
+        
+    try:
+        response = requests.get(url)
+        # print(f"Response status: {response.status_code}")
+        
+        if response.status_code == 200:
+            buffer = BytesIO(response.content)
+            # print(f"Buffer size: {len(response.content)} bytes")
+            image = Image.open(buffer).convert("RGB")
+            # print(f"Image size: {image.size}")
+            return image
+        else:
+            # print(f"Failed to download image: status code {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Exception during image download: {str(e)}")
+        return None

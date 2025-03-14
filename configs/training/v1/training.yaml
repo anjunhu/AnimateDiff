@@ -13,7 +13,7 @@ unet_additional_kwargs:
   motion_module_kwargs:
     num_attention_heads                : 8
     num_transformer_block              : 1
-    attention_block_types              : [ "Temporal_Self", "Temporal_Self" ]
+    attention_block_types              : [ "Temporal_Self", "Temporal_Self"]
     temporal_position_encoding         : true
     temporal_position_encoding_max_len : 32
     temporal_attention_dim_div         : 1
@@ -28,11 +28,10 @@ noise_scheduler_kwargs:
   clip_sample:         false
 
 train_data:
-  # csv_path:        "path_to_csv_file"
-  # video_folder:    "path_to_video_foler"
-  sample_size:     512
+  video_folders:    "/home/ubuntu/video/AnimateDiff/__assets__/filtered_webvid_datasets/"
+  sample_size:     256
   sample_stride:   4
-  sample_n_frames: 8
+  sample_n_frames: 32
 
 validation_data:
   prompts:

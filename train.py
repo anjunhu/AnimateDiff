@@ -1,4 +1,5 @@
 import os
+os.environ["DISABLE_PROGRESSBAR"] = "1"
 import re
 import math
 import wandb
@@ -8,7 +9,9 @@ import inspect
 import argparse
 import datetime
 import subprocess
+import wandb
 
+import numpy as np
 from pathlib import Path
 from tqdm.auto import tqdm
 from einops import rearrange
@@ -33,12 +36,14 @@ from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
 
 import transformers
-from transformers import CLIPTextModel, CLIPTokenizer
+from torchvision.models import resnet18
+import lpips
 
 from animatediff.data.dataset import WebVid10M
 from animatediff.models.unet import UNet3DConditionModel
 from animatediff.pipelines.pipeline_animation import AnimationPipeline
-from animatediff.utils.util import save_videos_grid, zero_rank_print
+from animatediff.utils.util import save_videos_grid, zero_rank_print, download_image
+from datasets import load_dataset, concatenate_datasets, Dataset
 
 
 
@@ -66,7 +71,7 @@ def init_dist(launcher="slurm", backend='nccl', port=29500, **kwargs):
         port = os.environ.get('PORT', port)
         os.environ['MASTER_PORT'] = str(port)
         dist.init_process_group(backend=backend)
-        zero_rank_print(f"proc_id: {proc_id}; local_rank: {local_rank}; ntasks: {ntasks}; node_list: {node_list}; num_gpus: {num_gpus}; addr: {addr}; port: {port}")
+        print(f"proc_id: {proc_id}; local_rank: {local_rank}; ntasks: {ntasks}; node_list: {node_list}; num_gpus: {num_gpus}; addr: {addr}; port: {port}")
         
     else:
         raise NotImplementedError(f'Not implemented launcher type: `{launcher}`!')
@@ -151,7 +156,7 @@ def main(
     )
 
     if is_main_process and (not is_debug) and use_wandb:
-        run = wandb.init(project="animatediff", name=folder_name, config=config)
+        run = wandb.init(project="animatediff-photorealistic50x", name=folder_name, config=config)
 
     # Handle the output folder creation
     if is_main_process:
@@ -161,12 +166,49 @@ def main(
         os.makedirs(f"{output_dir}/checkpoints", exist_ok=True)
         OmegaConf.save(config, os.path.join(output_dir, 'config.yaml'))
 
+    # Initialize LPIPS model
+    lpips_model = lpips.LPIPS(net='alex').eval().to(local_rank)
+
+    # Initialize ResNet
+    resnet_model = resnet18(pretrained=True)
+    resnet_model = torch.nn.Sequential(*list(resnet_model.children())[:6])
+    resnet_model.eval().to(local_rank)
+    
+    # Define LPIPS-compatible preprocessing
+    lpips_preprocess = torchvision.transforms.Compose([
+                       torchvision.transforms.Resize((256, 256)),
+                       torchvision.transforms.ToTensor(),
+                       torchvision.transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+                       ])
+
+
+    def extract_resnet_features(images):
+        """
+        Extract features using shallow ResNet layers.
+        Args:
+            images: List of PIL.Image objects.
+        Returns:
+            Normalized feature tensor.
+        """
+        preprocess = torchvision.transforms.Compose([
+            torchvision.transforms.Resize((224, 224)),
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        image_tensor = torch.stack([preprocess(img) for img in images]).to(local_rank)
+        with torch.no_grad():
+            features = resnet_model(image_tensor)
+        return features / features.norm(p=2, dim=1, keepdim=True)
+
+    clip_model = transformers.CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+    clip_processor = transformers.CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+
     # Load scheduler, tokenizer and models.
     noise_scheduler = DDIMScheduler(**OmegaConf.to_container(noise_scheduler_kwargs))
 
     vae          = AutoencoderKL.from_pretrained(pretrained_model_path, subfolder="vae")
-    tokenizer    = CLIPTokenizer.from_pretrained(pretrained_model_path, subfolder="tokenizer")
-    text_encoder = CLIPTextModel.from_pretrained(pretrained_model_path, subfolder="text_encoder")
+    tokenizer    = transformers.CLIPTokenizer.from_pretrained(pretrained_model_path, subfolder="tokenizer")
+    text_encoder = transformers.CLIPTextModel.from_pretrained(pretrained_model_path, subfolder="text_encoder")
     if not image_finetune:
         unet = UNet3DConditionModel.from_pretrained_2d(
             pretrained_model_path, subfolder="unet", 
@@ -176,19 +218,21 @@ def main(
         unet = UNet2DConditionModel.from_pretrained(pretrained_model_path, subfolder="unet")
         
     # Load pretrained unet weights
+    # unet_checkpoint_path = "outputs/training-2024-12-07T20-47-36/checkpoints/checkpoint.ckpt"
     if unet_checkpoint_path != "":
-        zero_rank_print(f"from checkpoint: {unet_checkpoint_path}")
+        print(f"from checkpoint: {unet_checkpoint_path}")
         unet_checkpoint_path = torch.load(unet_checkpoint_path, map_location="cpu")
-        if "global_step" in unet_checkpoint_path: zero_rank_print(f"global_step: {unet_checkpoint_path['global_step']}")
+        if "global_step" in unet_checkpoint_path: print(f"global_step: {unet_checkpoint_path['global_step']}")
         state_dict = unet_checkpoint_path["state_dict"] if "state_dict" in unet_checkpoint_path else unet_checkpoint_path
-
-        m, u = unet.load_state_dict(state_dict, strict=False)
-        zero_rank_print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
+        new_state_dict = {key.replace("module.", ""): value for key, value in state_dict.items()}
+        m, u = unet.load_state_dict(new_state_dict, strict=False)
+        print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
         assert len(u) == 0
         
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
+    clip_model.requires_grad_(False)
     
     # Set unet trainable parameters
     unet.requires_grad_(False)
@@ -208,8 +252,8 @@ def main(
     )
 
     if is_main_process:
-        zero_rank_print(f"trainable params number: {len(trainable_params)}")
-        zero_rank_print(f"trainable params scale: {sum(p.numel() for p in trainable_params) / 1e6:.3f} M")
+        print(f"trainable params number: {len(trainable_params)}")
+        print(f"trainable params scale: {sum(p.numel() for p in trainable_params) / 1e6:.3f} M")
 
     # Enable xformers
     # if enable_xformers_memory_efficient_attention:
@@ -225,6 +269,13 @@ def main(
     # Move models to GPU
     vae.to(local_rank)
     text_encoder.to(local_rank)
+    clip_model.to(local_rank)
+    
+    def extract_clip_features(images):
+        image_input = clip_processor(images=images, return_tensors="pt").to(clip_model.device)
+        with torch.no_grad():
+            features = clip_model.get_image_features(**image_input)
+        return features / features.norm(p=2, dim=-1, keepdim=True)
 
     # Get the training dataset
     train_dataset = WebVid10M(**train_data, is_image=image_finetune)
@@ -236,6 +287,12 @@ def main(
         seed=global_seed,
     )
 
+    if is_main_process and (not is_debug) and use_wandb:
+        wandb.config.update({
+            "video_folders": os.listdir(train_dataset.video_folders),
+            "num_samples": len(train_dataset),
+        })
+
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -246,6 +303,8 @@ def main(
         pin_memory=True,
         drop_last=True,
     )
+    
+    eval_dataset = train_dataset.eval_data
 
     # Get the training iteration
     if max_train_steps == -1:
@@ -299,11 +358,11 @@ def main(
         logging.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
         logging.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
         logging.info(f"  Total optimization steps = {max_train_steps}")
-    global_step = 0
+    global_step = unet_checkpoint_path['global_step'] if "global_step" in unet_checkpoint_path else 0
     first_epoch = 0
-
+    
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(global_step, max_train_steps), disable=not is_main_process)
+    progress_bar = tqdm(range(global_step, max_train_steps), disable=True)
     progress_bar.set_description("Steps")
 
     # Support mixed-precision training
@@ -405,8 +464,8 @@ def main(
             ### <<<< Training <<<< ###
             
             # Wandb logging
-            if is_main_process and (not is_debug) and use_wandb:
-                wandb.log({"train_loss": loss.item()}, step=global_step)
+            # if is_main_process and (not is_debug) and use_wandb:
+            #     wandb.log({"train_loss": loss.item()}, step=global_step)
                 
             # Save checkpoint
             if is_main_process and (global_step % checkpointing_steps == 0 or step == len(train_dataloader) - 1):
@@ -421,22 +480,42 @@ def main(
                 else:
                     torch.save(state_dict, os.path.join(save_path, f"checkpoint.ckpt"))
                 logging.info(f"Saved state to {save_path} (global_step: {global_step})")
+            
+            generator = torch.Generator(device=latents.device)
+            generator.manual_seed(global_seed)
+            
+            height = train_data.sample_size[0] if not isinstance(train_data.sample_size, int) else train_data.sample_size
+            width  = train_data.sample_size[1] if not isinstance(train_data.sample_size, int) else train_data.sample_size
                 
             # Periodically validation
-            if is_main_process and (global_step % validation_steps == 0 or global_step in validation_steps_tuple):
-                samples = []
+            if is_main_process and (global_step % 1000 == 0 or global_step in [1,]):    
+                print("#"*50, f"At Global Step {global_step} - Examine transferred memorisation from SD")
+                sd_samples = []    
                 
-                generator = torch.Generator(device=latents.device)
-                generator.manual_seed(global_seed)
-                
-                height = train_data.sample_size[0] if not isinstance(train_data.sample_size, int) else train_data.sample_size
-                width  = train_data.sample_size[1] if not isinstance(train_data.sample_size, int) else train_data.sample_size
+                ############################################################
+                # Examine transferred memorisation from SD
+                ############################################################
+                sdv1_bb_edge = load_dataset("/home/ubuntu/video/AnimateDiff/__assets__/one-step-extraction/", data_files={'train': 'sdv1_bb_edge_groundtruth.parquet',})
+                sdv1_wb = load_dataset("/home/ubuntu/video/AnimateDiff/__assets__/one-step-extraction/", data_files={'train': 'sdv1_wb_groundtruth.parquet',})
+                seen_captions = set()
+                filtered_samples = []
 
-                prompts = validation_data.prompts[:] if global_step < 1000 and (not image_finetune) else validation_data.prompts
-                prompts = train_dataset.get_unique_names() + prompts # check training caption memorisation
+                # Iterate through both datasets
+                for dataset in [sdv1_bb_edge['train'], sdv1_wb['train']]:
+                    for sample in dataset:
+                        caption = sample['caption']
+                        if caption not in seen_captions and sample['overfit_type'] == 'MV':
+                            seen_captions.add(caption)
+                            filtered_samples.append(sample)
+                sd_transfer_prompts = Dataset.from_list(filtered_samples)
 
-                for idx, prompt in enumerate(prompts):
-                    if not image_finetune:
+                for idx, sample in enumerate(sd_transfer_prompts):
+                    # Extract features for reference image
+                    ref_pil_image = download_image(sample['url'])
+                    if ref_pil_image is None: continue
+                        
+                    prompt = sample['caption']
+                    if True:
                         sample = validation_pipeline(
                             prompt,
                             generator    = generator,
@@ -446,32 +525,170 @@ def main(
                             **validation_data,
                         ).videos
                         fn = re.sub(r'\W', '_', prompt)
-                        save_videos_grid(sample, f"{output_dir}/samples/sample-{global_step}/{idx}_{fn}.gif")
-                        samples.append(sample)
+                        save_videos_grid(sample, f"{output_dir}/samples/sample-{global_step}/sd_{idx}_{fn}.gif")
+                        sd_samples.append(sample)
                         
-                    else:
-                        sample = validation_pipeline(
-                            prompt,
-                            generator           = generator,
-                            height              = height,
-                            width               = width,
-                            num_inference_steps = validation_data.get("num_inference_steps", 25),
-                            guidance_scale      = validation_data.get("guidance_scale", 8.),
-                        ).images[0]
-                        sample = torchvision.transforms.functional.to_tensor(sample)
-                        samples.append(sample)
+                        # BCTHW -> TCHW for wandb.Video
+                        video_frames = rearrange(sample[0], "c t h w -> t c h w").detach().cpu()
+                        video_frames_pil = [torchvision.transforms.ToPILImage()(frame) for frame in video_frames]
+                        
+                        # LPIPS similarity
+                        lpips_scores = []
+                        for frame in video_frames_pil:
+                            ref_tensor = lpips_preprocess(ref_pil_image).unsqueeze(0).to(local_rank)
+                            frame_tensor = lpips_preprocess(frame).unsqueeze(0).to(local_rank)
+                            lpips_score = lpips_model(ref_tensor, frame_tensor).item()
+                            lpips_scores.append(lpips_score)
+                        max_lpips = np.max(lpips_scores)
+
+                        # ResNet feature similarity
+                        ref_features = extract_resnet_features([ref_pil_image] * len(video_frames_pil))
+                        frame_features = extract_resnet_features(video_frames_pil)
+                        resnet_similarities = F.cosine_similarity(ref_features, frame_features, dim=-1)
+                        max_resnet_similarity = resnet_similarities.max().item()
+
+                        # Extract features for reference images and generated frames
+                        video_inputs = clip_processor(images=video_frames_pil, return_tensors="pt").to(local_rank)
+                        with torch.no_grad():
+                            video_features = clip_model.get_image_features(pixel_values=video_inputs['pixel_values'])
+                            video_features = video_features / video_features.norm(p=2, dim=-1, keepdim=True)                    
+                        ref_features = extract_clip_features([ref_pil_image]*len(video_frames_pil))
+                        # print(ref_features.shape, video_features.shape)
+                        
+                        # Compute cosine similarity
+                        similarities = F.cosine_similarity(ref_features, video_features, dim=-1)
+                        max_clip_similarity = similarities.max().item()
+
+                        # Ensure pixel values are in [0, 255] and of type uint8
+                        videos_np = (video_frames.numpy() * 255).clip(0, 255).astype(np.uint8)
+
+                        if use_wandb:
+                            wandb.log({
+                                f"clip_sim/sd_{idx}_{fn}": max_clip_similarity,
+                                f"res_sim/sd_{idx}_{fn}": max_resnet_similarity,
+                                f"lpips/sd_{idx}_{fn}": max_lpips,
+                                f"generated_videos/sd_{idx}_{fn}": wandb.Video(videos_np, caption=prompt, fps=4, format="gif"),
+                                f"reference_images/sd_{idx}_{fn}": wandb.Image(ref_pil_image, caption=prompt)
+                            }, step=global_step)
+                            
+                        print(f"SD Prompt: {prompt}, LPIPS: {max_lpips:.4f}, ResNet: {max_resnet_similarity:.4f}, CLIP: {max_clip_similarity:.4f}")
                 
                 if not image_finetune:
-                    samples = torch.concat(samples)
-                    save_path = f"{output_dir}/samples/sample-{global_step}.gif"
-                    save_videos_grid(samples, save_path)
-                    
+                    sd_samples = torch.concat(sd_samples)
+                    save_path = f"{output_dir}/samples/sd_sample-{global_step}.gif"
+                    save_videos_grid(sd_samples, save_path)
                 else:
-                    samples = torch.stack(samples)
-                    save_path = f"{output_dir}/samples/sample-{global_step}.png"
-                    torchvision.utils.save_image(samples, save_path, nrow=4)
+                    sd_samples = torch.stack(sd_samples)
+                    save_path = f"{output_dir}/samples/sd_sample-{global_step}.png"
+                    torchvision.utils.save_image(sd_samples, save_path, nrow=4)
+                    
+            if is_main_process and (global_step % (len(train_dataset)//2) == 0 or global_step in [1,]):   
+                print("#"*50, f"At Global Step {global_step} - Examine memorisation from WebVid10M")
+                wv_samples = []    
+                
+                ############################################################
+                # Examine memorisation from video dataset (WebVid10M)
+                ############################################################
+                for idx, sample in enumerate(eval_dataset):
+                    prompt = sample["first_caption"]
+                    reference_visual = sample["reference_visual"]  # Reference visual in numpy format [F, H, W, 3]
 
+                    # Preprocess reference_visual for LPIPS, ResNet, and CLIP evaluation
+                    reference_frames = [torchvision.transforms.functional.to_tensor(frame).to(local_rank) for frame in reference_visual]
+                    reference_frames = [torchvision.transforms.functional.normalize(frame, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]) for frame in reference_frames]
+
+                    # Generate videos or images based on the pipeline
+                    if not image_finetune:
+                        generated_video = validation_pipeline(
+                            prompt,
+                            generator=generator,
+                            video_length=train_data.sample_n_frames,
+                            height=height,
+                            width=width,
+                            **validation_data,
+                        ).videos
+
+                        fn = re.sub(r'\W', '_', prompt)
+                        save_videos_grid(generated_video, f"{output_dir}/samples/sample-{global_step}/wv_{idx}_{fn}.gif")
+                        wv_samples.append(generated_video)
+                        
+                        # BCTHW -> TCHW for wandb.Video
+                        video_frames = rearrange(generated_video[0], "c t h w -> t c h w").detach().cpu()
+                        video_frames_pil = [torchvision.transforms.ToPILImage()(frame) for frame in video_frames]
+
+                        # LPIPS similarity between two VIDEOS
+                        ref_frames = [torchvision.transforms.ToPILImage()(torch.from_numpy(frame).permute(2, 0, 1)) for frame in reference_visual]
+
+                        # Ensure same number of frames for comparison
+                        min_frames = min(len(video_frames_pil), len(ref_frames))
+                        video_frames_pil = video_frames_pil[:min_frames]
+                        ref_frames = ref_frames[::2]
+
+                        lpips_scores = []
+                        for gen_frame, ref_frame in zip(video_frames_pil, ref_frames):
+                            ref_tensor = lpips_preprocess(ref_frame).unsqueeze(0).to(local_rank)
+                            frame_tensor = lpips_preprocess(gen_frame).unsqueeze(0).to(local_rank)
+                            lpips_score = lpips_model(ref_tensor, frame_tensor).item()
+                            lpips_scores.append(lpips_score)
+                        max_lpips_wv = np.max(lpips_scores)
+
+                        # ResNet feature similarity between two VIDEOS
+                        ref_features = extract_resnet_features(ref_frames)
+                        frame_features = extract_resnet_features(video_frames_pil)
+                        resnet_similarities = F.cosine_similarity(ref_features, frame_features, dim=-1)
+                        max_resnet_similarity_wv = resnet_similarities.max().item()
+
+                        # Extract CLIP features for generated frames and reference video frames
+                        video_inputs = clip_processor(images=video_frames_pil, return_tensors="pt").to(local_rank)
+                        ref_inputs = clip_processor(images=ref_frames, return_tensors="pt").to(local_rank)
+
+                        with torch.no_grad():
+                            video_features = clip_model.get_image_features(pixel_values=video_inputs['pixel_values'])
+                            video_features = video_features / video_features.norm(p=2, dim=-1, keepdim=True)
+                            
+                            ref_features = clip_model.get_image_features(pixel_values=ref_inputs['pixel_values'])
+                            ref_features = ref_features / ref_features.norm(p=2, dim=-1, keepdim=True)
+
+                        # Compute cosine similarity between two VIDEOS
+                        similarities = F.cosine_similarity(ref_features, video_features, dim=-1)
+                        max_clip_similarity_wv = similarities.max().item()
+
+                        # Prepare reference visual for wandb logging
+                        # Convert numpy array to tensor and ensure it's in the right format (T, C, H, W)
+                        reference_visual_tensor = torch.from_numpy(reference_visual).float()
+                        reference_visual_tensor = reference_visual_tensor.permute(0, 3, 1, 2)  # (F, H, W, 3) -> (F, 3, H, W)
+                        # Scale values to [0, 255] and convert to uint8
+                        reference_visual_wandb = (reference_visual_tensor.numpy() * 255).clip(0, 255).astype(np.uint8)
+                        print(reference_visual_wandb.shape)
+
+                        # Ensure pixel values are in [0, 255] and of type uint8
+                        videos_np = (video_frames.numpy() * 255).clip(0, 255).astype(np.uint8)
+
+                        # Log results to wandb
+                        if use_wandb:
+                            wandb.log({
+                                f"clip_sim/wv_{idx}_{fn}": max_clip_similarity_wv,
+                                f"res_sim/wv_{idx}_{fn}": max_resnet_similarity_wv,
+                                f"lpips/wv_{idx}_{fn}": max_lpips_wv,
+                                f"generated_videos/wv_{idx}_{fn}": wandb.Video(videos_np, caption=prompt, fps=4, format="gif"),
+                                f"reference_videos/wv_{idx}_{fn}": wandb.Video(np.stack(reference_visual_wandb), caption=prompt, fps=4, format="gif"),
+                            }, step=global_step)
+
+                        print(f"WV Prompt: {prompt}, LPIPS: {max_lpips_wv:.4f}, ResNet: {max_resnet_similarity_wv:.4f}, CLIP: {max_clip_similarity_wv:.4f}")
+
+                    else:
+                        pass
+
+                if not image_finetune:
+                    wvsamples = torch.cat(wv_samples)
+                    save_path = f"{output_dir}/samples/wvsample-{global_step}.gif"
+                    save_videos_grid(wvsamples, save_path)
+                else:
+                    wvsamples = torch.stack(wv_samples)
+                    save_path = f"{output_dir}/samples/wvsample-{global_step}.png"
+                    torchvision.utils.save_image(wvsamples, save_path, nrow=4)
                 logging.info(f"Saved samples to {save_path}")
+
                 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)

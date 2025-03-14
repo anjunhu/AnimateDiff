@@ -2,8 +2,10 @@ import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
+import wandb
 import random
 import ffmpeg
+import pickle
 import numpy as np
 import torch
 import torchvision.transforms as transforms
@@ -19,27 +21,62 @@ from typing import List
 class WebVid10M(Dataset):
     def __init__(
             self,
-            video_folders: List[str]=["/home/ubuntu/video/AnimateDiff/__assets__/filtered_webvid_datasets/filtered_webvid_dataset_3_Fire flames igniting and burni",
-                                    #   "/home/ubuntu/video/AnimateDiff/__assets__/filtered_webvid_datasets/filtered_webvid_dataset_1_Abstract background with beaut",
-                                      "/home/ubuntu/video/AnimateDiff/__assets__/filtered_webvid_datasets/filtered_webvid_dataset_2_Aluminium can. 3d render of me",
-                                      ],
+            video_folders = "/home/ubuntu/video/AnimateDiff/__assets__/filtered_webvid_datasets/",
             sample_size=256, sample_stride=4, sample_n_frames=16,
-            is_image=False,
+            is_image=False, n_eval_per_cluster=1,
             split="train"
         ):
+        self.video_folders = video_folders
+        self.eval_data = [] 
+        
         if not video_folders:
             print(f"Loading full dataset from Hugging Face ...")
             # Load dataset from Hugging Face
             self.dataset = load_dataset("TempoFunk/webvid-10M", split="train")
             self.length = len(self.dataset)
         else:
+            self.list_of_cluster_dataset_dirs = sorted([folder for folder in os.listdir(video_folders)
+                                                        if folder.startswith("filtered_webvid_dataset_") and 
+                                                        os.path.isdir(os.path.join(video_folders, folder)) ])
             datasets = []
-            for folder in video_folders:
+            for folder in self.list_of_cluster_dataset_dirs:
+                cluster_path = os.path.join(video_folders, folder)
                 print(f"Loading dataset from {folder}...")
-                datasets.append(load_from_disk(folder))
+                
+                # Attempt to load reference visual and metadata
+                try:
+                    metadata_file = os.path.join(cluster_path, "metadata.pkl")
+                    if not os.path.exists(metadata_file):
+                        print(f"Metadata file not found in {cluster_path}. Skipping...")
+                        continue
+
+                    # Load metadata
+                    with open(metadata_file, "rb") as f:
+                        metadata = pickle.load(f)
+
+                    # Load reference visual
+                    reference_visual = self.download_video(
+                        load_from_disk(os.path.join(cluster_path))[0]['contentUrl']
+                    )
+
+                    # Add to eval_data
+                    first_caption = metadata.get("first_caption", None)
+                    if first_caption:
+                        for _ in range(n_eval_per_cluster):
+                            sample_dict = metadata.copy()
+                            sample_dict.update({'reference_visual': reference_visual})
+                            self.eval_data.append(sample_dict)
+                except Exception as e:
+                    print(f"Error processing cluster {folder}: {e}")
+                    continue
+
+                # Load dataset from disk and add to combined dataset
+                datasets.append(load_from_disk(cluster_path))
+            
             self.dataset = concatenate_datasets(datasets)
             self.length = len(self.dataset)
-        print(f"data length: {self.length}")
+        
+        print(f"training data length: {self.length}")
         
         self.sample_stride   = sample_stride
         self.sample_n_frames = sample_n_frames
@@ -52,6 +89,10 @@ class WebVid10M(Dataset):
             transforms.CenterCrop(sample_size),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
         ])
+
+    def get_eval_data(self):
+        """Retrieve precomputed evaluation data."""
+        return self.eval_data
         
     def get_unique_names(self):
         print("Collecting unique training prompts...")
@@ -140,8 +181,10 @@ if __name__ == "__main__":
         split="train"  # Specify the split (train, val, etc.)
     )
     
-    unique_train_captions = dataset.get_unique_names()
-    print(len(unique_train_captions), unique_train_captions)
+    # unique_train_captions = dataset.get_unique_names()
+    # print(len(unique_train_captions), unique_train_captions)
+    
+    print(dataset.get_n_captions_per_cluster())
     
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, num_workers=16)
     # for idx, batch in enumerate(dataloader):
