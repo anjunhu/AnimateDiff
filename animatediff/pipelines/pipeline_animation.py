@@ -40,7 +40,7 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 @dataclass
 class AnimationPipelineOutput(BaseOutput):
     videos: Union[torch.Tensor, np.ndarray]
-
+    noise_diff: list
 
 class AnimationPipeline(DiffusionPipeline):
     _optional_components = []
@@ -397,6 +397,10 @@ class AnimationPipeline(DiffusionPipeline):
 
         # Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        
+        # Memorisation Metric
+        intermediate_noise_diffs = []
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
@@ -445,6 +449,8 @@ class AnimationPipeline(DiffusionPipeline):
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    noise_diff = noise_pred_text - noise_pred_uncond
+                    intermediate_noise_diffs.append(noise_diff.detach())
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
@@ -465,4 +471,4 @@ class AnimationPipeline(DiffusionPipeline):
         if not return_dict:
             return video
 
-        return AnimationPipelineOutput(videos=video)
+        return AnimationPipelineOutput(videos=video, noise_diff=intermediate_noise_diffs)

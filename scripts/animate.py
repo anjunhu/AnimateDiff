@@ -26,7 +26,11 @@ import csv, pdb, glob, math
 from pathlib import Path
 from PIL import Image
 import numpy as np
+import wandb
 
+SSIM_MEM_THRESHOLD = 0.5
+MSE_MEM_THRESHOLD = 2800
+TARGET_ROOT = "/scratch/local/ssd/anjun/memorization/SDMemTarget/sdv1_bb/original"
 
 @torch.no_grad()
 def main(args):
@@ -114,9 +118,9 @@ def main(args):
                 controlnet_images = rearrange(controlnet_images, "(b f) c h w -> b c f h w", f=num_controlnet_images)
 
         # set xformers
-        if is_xformers_available() and (not args.without_xformers):
-            unet.enable_xformers_memory_efficient_attention()
-            if controlnet is not None: controlnet.enable_xformers_memory_efficient_attention()
+        # if is_xformers_available() and (not args.without_xformers):
+        #     unet.enable_xformers_memory_efficient_attention()
+        #     if controlnet is not None: controlnet.enable_xformers_memory_efficient_attention()
 
         pipeline = AnimationPipeline(
             vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
@@ -166,11 +170,17 @@ def main(args):
 
                 controlnet_images = controlnet_images,
                 controlnet_image_index = model_config.get("controlnet_image_indexs", [0]),
-            ).videos
-            samples.append(sample)
+            )
+            samples.append(sample.videos)
+            
+            # TODO: Compare to target image in a per-frame fashion and assign memorized/not memorized labels here
+
+            # TODO: HERE WE HAVE A LIST sample.noise_diff, NOW PLOT THEM
+            noise_norms = [diff.norm(p=2).item() for diff in sample.noise_diff]
+            
 
             prompt = "-".join((prompt.replace("/", "").split(" ")[:10]))
-            save_videos_grid(sample, f"{savedir}/sample/{sample_idx}-{prompt}.gif")
+            save_videos_grid(sample.videos, f"{savedir}/sample/{sample_idx}-{prompt}.gif")
             print(f"save to {savedir}/sample/{prompt}.gif")
             
             sample_idx += 1

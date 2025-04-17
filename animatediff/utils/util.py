@@ -135,7 +135,7 @@ def load_weights(
             
         # 1. vae
         converted_vae_checkpoint = convert_ldm_vae_checkpoint(dreambooth_state_dict, animation_pipeline.vae.config)
-        animation_pipeline.vae.load_state_dict(converted_vae_checkpoint)
+        animation_pipeline.vae.load_state_dict(converted_vae_checkpoint, strict=False)
         # 2. unet
         converted_unet_checkpoint = convert_ldm_unet_checkpoint(dreambooth_state_dict, animation_pipeline.unet.config)
         animation_pipeline.unet.load_state_dict(converted_unet_checkpoint, strict=False)
