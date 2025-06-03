@@ -1,7 +1,7 @@
 image_finetune: true
 
 output_dir: "outputs"
-pretrained_model_path: "models/StableDiffusion/stable-diffusion-v1-5"
+pretrained_model_path: "stable-diffusion-v1-5/stable-diffusion-v1-5"
 
 noise_scheduler_kwargs:
   num_train_timesteps: 1000
@@ -13,8 +13,10 @@ noise_scheduler_kwargs:
 
 train_data:
   csv_path:     "path_to_csv_file"
-  video_folder: "path_to_video_foler"
-  sample_size:  256
+  video_folder: "./__assets__/filtered_webvid_datasets_UN0050_avgCLIPvar"
+  sample_size:  512
+  sample_stride:   4
+  sample_n_frames: 8
 
 validation_data:
   prompts:
@@ -31,7 +33,7 @@ trainable_modules:
 unet_checkpoint_path: ""
 
 learning_rate:    1.e-5
-train_batch_size: 50
+train_batch_size: 8
 
 max_train_epoch:      -1
 max_train_steps:      100

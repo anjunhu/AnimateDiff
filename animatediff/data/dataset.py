@@ -21,26 +21,26 @@ from typing import List
 class WebVid10M(Dataset):
     def __init__(
             self,
-            video_folders = "/home/ubuntu/video/AnimateDiff/__assets__/filtered_webvid_datasets/",
+            video_folder = "/home/ubuntu/video/AnimateDiff/__assets__/filtered_webvid_datasets/",
             sample_size=256, sample_stride=4, sample_n_frames=16,
             is_image=False, n_eval_per_cluster=1,
-            split="train"
+            split="train", csv_path="",
         ):
-        self.video_folders = video_folders
+        self.video_folder = video_folder
         self.eval_data = [] 
         
-        if not video_folders:
+        if not video_folder:
             print(f"Loading full dataset from Hugging Face ...")
             # Load dataset from Hugging Face
             self.dataset = load_dataset("TempoFunk/webvid-10M", split="train")
             self.length = len(self.dataset)
         else:
-            self.list_of_cluster_dataset_dirs = sorted([folder for folder in os.listdir(video_folders)
+            self.list_of_cluster_dataset_dirs = sorted([folder for folder in os.listdir(video_folder)[:10]
                                                         if folder.startswith("filtered_webvid_dataset_") and 
-                                                        os.path.isdir(os.path.join(video_folders, folder)) ])
+                                                        os.path.isdir(os.path.join(video_folder, folder)) ])
             datasets = []
             for folder in self.list_of_cluster_dataset_dirs:
-                cluster_path = os.path.join(video_folders, folder)
+                cluster_path = os.path.join(video_folder, folder)
                 print(f"Loading dataset from {folder}...")
                 
                 # Attempt to load reference visual and metadata
@@ -76,7 +76,7 @@ class WebVid10M(Dataset):
             self.dataset = concatenate_datasets(datasets)
             self.length = len(self.dataset)
         
-        print(f"training data length: {self.length}")
+        print("="*10, f"\ntraining data length: {self.length}")
         
         self.sample_stride   = sample_stride
         self.sample_n_frames = sample_n_frames
@@ -174,7 +174,7 @@ if __name__ == "__main__":
     from animatediff.utils.util import save_videos_grid
 
     dataset = WebVid10M(
-        # video_folders=None, # None = full dataset
+        # video_folder=None, # None = full dataset
         sample_size=256,
         sample_stride=4, sample_n_frames=16,
         is_image=False,

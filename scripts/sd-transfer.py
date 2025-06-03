@@ -57,10 +57,8 @@ def main(args):
     savedir = f"samples/{Path(args.config).stem}-{time_str}"
     os.makedirs(savedir, exist_ok=True)
     os.makedirs(os.path.join(savedir, "sample"), exist_ok=True)
-    os.makedirs(os.path.join(savedir, "mem", "mse"), exist_ok=True)
-    os.makedirs(os.path.join(savedir, "baseline", "mse"), exist_ok=True)
-    os.makedirs(os.path.join(savedir, "mem", "mp4"), exist_ok=True)
-    os.makedirs(os.path.join(savedir, "baseline", "mp4"), exist_ok=True)
+    os.makedirs(os.path.join(savedir, "laion"), exist_ok=True)
+    os.makedirs(os.path.join(savedir, "baseline"), exist_ok=True)
 
     config = OmegaConf.load(args.config)
     samples = []
@@ -162,9 +160,9 @@ def main(args):
             adapter_lora_path=model_config.get("adapter_lora_path", ""),
             adapter_lora_scale=model_config.get("adapter_lora_scale", 1.0),
             # image layers
-            dreambooth_model_path=model_config.get("dreambooth_path", ""),
-            lora_model_path=model_config.get("lora_model_path", ""),
-            lora_alpha=model_config.get("lora_alpha", 0.8),
+            # dreambooth_model_path=model_config.get("dreambooth_path", ""),
+            # lora_model_path=model_config.get("lora_model_path", ""),
+            # lora_alpha=model_config.get("lora_alpha", 0.8),
         ).to("cuda")
 
         # Process memorized prompts
@@ -182,89 +180,88 @@ def main(args):
         
         config[model_idx].random_seed = []
         for prompt_idx, (prompt, n_prompt, random_seed) in enumerate(zip(prompts, n_prompts, random_seeds)):
-            # Manually set random seed for reproduction
-            if random_seed != -1: torch.manual_seed(random_seed)
-            else: torch.seed()
-            config[model_idx].random_seed.append(torch.initial_seed())
-            
-            print(f"Current seed: {torch.initial_seed()}")
-            print(f"Processing baseline prompt ({prompt})...")
-            
-            # Generate the video
-            sample = pipeline(
-                prompt,
-                negative_prompt=n_prompt,
-                num_inference_steps=model_config.steps,
-                guidance_scale=model_config.guidance_scale,
-                width=model_config.W,
-                height=model_config.H,
-                video_length=model_config.L,
-                controlnet_images=controlnet_images,
-                controlnet_image_index=model_config.get("controlnet_image_indexs", [0]),
-            )
-            samples.append(sample.videos)
-            
-            # Calculate metrics
-            safe_prompt = re.sub(r'\W+', '_', prompt)
-            mse_xt = sample.mse_xt if hasattr(sample, 'mse_xt') else []
-            mse_pred_x0 = sample.mse_pred_x0 if hasattr(sample, 'mse_pred_x0') else []
-            noise_norms = [diff.norm(p=2).item() for diff in sample.noise_diff] if hasattr(sample, 'noise_diff') else []
-            label = 0  # Baseline prompts are not memorized
-            
-            # Save baseline prompt outputs
-            output_dir = os.path.join(savedir, "baseline", "mse")
-            
-            # Save trajectory data
-            traj_path = os.path.join(output_dir, f"{sample_idx}_{label}_{safe_prompt}_traj.json")
-            with open(traj_path, 'w') as f:
-                json.dump({
-                    "prompt": prompt,
-                    "index": sample_idx,
-                    "label": label,
-                    "mse_xt": mse_xt,
-                    "mse_pred_x0": mse_pred_x0,
-                    "noise_diff_norms": noise_norms
-                }, f, indent=2)
+            for seed in range(2025, 2030):
+                config[model_idx].random_seed.append(torch.initial_seed())
                 
-            # Store curves for plotting
-            mem_curves[f"xt_{label}"].append(mse_xt)
-            mem_curves[f"x0_{label}"].append(mse_pred_x0)
-            mem_curves[f"diff_{label}"].append([a - b for a, b in zip(mse_xt, mse_pred_x0)] if mse_xt and mse_pred_x0 else [])
-            mem_curves[f"noise_{label}"].append(noise_norms)
-            
-            # Save video frames as image grid
-            vid_np = sample.videos[0].cpu().numpy()
-            final_img = np.concatenate(vid_np.astype(np.uint8), axis=1)
-            output_img_path = os.path.join(output_dir, f"{sample_idx}_{label}_{safe_prompt}.png")
-            Image.fromarray(final_img).save(output_img_path)
-            
-            # Save the video using imageio
-            video_output_path = os.path.join(savedir, "baseline", "mp4", f'{safe_prompt}.mp4')
-            imageio.mimwrite(video_output_path, vid_np, fps=8, quality=9)
-            
-            # Create noise norm plot
-            plt.figure(figsize=(10, 5))
-            plt.plot(noise_norms, label='tc-uc noise norms')
-            plt.xlabel("Denoising Step")
-            plt.ylabel("Noise Norm")
-            plt.title("Classifier-Free Guidance Noise Norms")
-            plt.legend()
-            noise_norm_plot_path = os.path.join(output_dir, f"{sample_idx}_{label}_{safe_prompt}_noise_norm_plot.png")
-            plt.savefig(noise_norm_plot_path)
-            plt.close()
-            
-            # Log to wandb if enabled
-            if args.use_wandb:
-                wandb.log({
-                    f"{sample_idx}_{label}_{safe_prompt}_img": wandb.Image(output_img_path, caption=f"Label: {label}"),
-                    f"{sample_idx}_{label}_{safe_prompt}_noise_norm_plot": wandb.Image(noise_norm_plot_path)
-                })
-            
-            # Standard output for the original script
-            short_prompt = "-".join((prompt.replace("/", "").split(" ")[:10]))
-            save_videos_grid(sample.videos, f"{savedir}/sample/{sample_idx}-{short_prompt}.gif")
-            print(f"Save to {savedir}/sample/{sample_idx}-{short_prompt}.gif")
-            
+                print(f"Current seed: {torch.initial_seed()}")
+                print(f"Processing baseline prompt ({prompt})...")
+                
+                # Generate the video
+                sample = pipeline(
+                    prompt,
+                    negative_prompt=n_prompt,
+                    num_inference_steps=model_config.steps,
+                    guidance_scale=model_config.guidance_scale,
+                    width=model_config.W,
+                    height=model_config.H,
+                    video_length=model_config.L,
+                    controlnet_images=controlnet_images,
+                    controlnet_image_index=model_config.get("controlnet_image_indexs", [0]),
+                    generator=torch.Generator(device="cuda").manual_seed(2025),
+                )
+                samples.append(sample.videos)
+                
+                # Calculate metrics
+                safe_prompt = re.sub(r'\W+', '_', prompt)
+                mse_xt = sample.mse_xt if hasattr(sample, 'mse_xt') else []
+                mse_pred_x0 = sample.mse_pred_x0 if hasattr(sample, 'mse_pred_x0') else []
+                noise_norms = [diff.norm(p=2).item() for diff in sample.noise_diff] if hasattr(sample, 'noise_diff') else []
+                label = 0  # Baseline prompts are not memorized
+                
+                # Save baseline prompt outputs
+                output_dir = os.path.join(savedir, "baseline")
+                
+                # Save trajectory data
+                traj_path = os.path.join(output_dir, f"{sample_idx:04d}_{label}_{safe_prompt}_traj.json")
+                with open(traj_path, 'w') as f:
+                    json.dump({
+                        "prompt": prompt,
+                        "index": sample_idx,
+                        "memorized": label,
+                        "mse_xt": mse_xt,
+                        "mse_pred_x0": mse_pred_x0,
+                        "noise_diff_norms": noise_norms
+                    }, f, indent=2)
+                    
+                # Store curves for plotting
+                mem_curves[f"xt_{label}"].append(mse_xt)
+                mem_curves[f"x0_{label}"].append(mse_pred_x0)
+                mem_curves[f"diff_{label}"].append([a - b for a, b in zip(mse_xt, mse_pred_x0)] if mse_xt and mse_pred_x0 else [])
+                mem_curves[f"noise_{label}"].append(noise_norms)
+                
+                # Save video frames as image grid
+                vid_np = sample.videos[0].cpu().numpy()
+                final_img = np.concatenate(vid_np.astype(np.uint8), axis=1)
+                output_img_path = os.path.join(output_dir, f"{sample_idx:04d}_{label}_{safe_prompt}.png")
+                # Image.fromarray(final_img).save(output_img_path)
+                
+                # Save the video using imageio
+                video_output_path = os.path.join(savedir, "baseline", f'{safe_prompt}.mp4')
+                # imageio.mimwrite(video_output_path, vid_np, fps=8, quality=9)
+                
+                # Create noise norm plot
+                plt.figure(figsize=(10, 5))
+                plt.plot(noise_norms, label='tc-uc noise norms')
+                plt.xlabel("Denoising Step")
+                plt.ylabel("Noise Norm")
+                plt.title("Classifier-Free Guidance Noise Norms")
+                plt.legend()
+                noise_norm_plot_path = os.path.join(output_dir, f"{sample_idx:04d}_{label}_{safe_prompt}_noise_norm_plot.png")
+                plt.savefig(noise_norm_plot_path)
+                plt.close()
+                
+                # Log to wandb if enabled
+                if args.use_wandb:
+                    wandb.log({
+                        f"{sample_idx:04d}_{label}_{safe_prompt}_img": wandb.Image(output_img_path, caption=f"Label: {label}"),
+                        f"{sample_idx:04d}_{label}_{safe_prompt}_noise_norm_plot": wandb.Image(noise_norm_plot_path)
+                    })
+                
+                # Standard output for the original script
+                short_prompt = "-".join((prompt.replace("/", "").split(" ")[:10]))
+                save_videos_grid(sample.videos, f"{savedir}/{sample_idx:04d}-{short_prompt}.gif")
+                print(f"Save to {savedir}/{sample_idx:04d}-{short_prompt}.gif")
+                
             sample_idx += 1
 
     # Create aggregate plots if data is available
@@ -284,149 +281,150 @@ def process_memorized_prompts(pipeline, data, savedir, model_config, args, mem_c
     """Process memorized prompts from dataset and evaluate memorization."""
     
     for i in range(len(data['train'])):
-        if data['train'][i]['overfit_type'] == args.mem_type.upper():
-            prompt = data['train'][i]['caption']
-            safe_prompt = re.sub(r'\W+', '_', prompt)
-            
-            # Check if target image exists
-            target_glob = os.path.join(TARGET_ROOT, args.mem_type.lower(), f"{i:04d}_*.png")
-            target_files = glob.glob(target_glob)
-            if not target_files:
-                continue
+        for seed in range(2025, 2030):
+            if data['train'][i]['overfit_type'] == args.mem_type.upper():
+                prompt = data['train'][i]['caption']
+                safe_prompt = re.sub(r'\W+', '_', prompt)
                 
-            print(f"Processing memorized prompt ({prompt})")
-            
-            # Generate the video
-            sample = pipeline(
-                prompt,
-                negative_prompt="",
-                num_inference_steps=model_config.steps,
-                guidance_scale=model_config.guidance_scale,
-                width=model_config.W,
-                height=model_config.H,
-                video_length=model_config.L,
-            )
-            
-            video = sample.videos
-            mse_xt = sample.mse_xt if hasattr(sample, 'mse_xt') else []
-            mse_pred_x0 = sample.mse_pred_x0 if hasattr(sample, 'mse_pred_x0') else []
-            
-            # Compare to target image
-            label = 0
-            target_img = Image.open(target_files[0]).convert("RGB")
-            transform = transforms.Compose([
-                transforms.Resize((video.shape[-1], video.shape[-2])),
-                transforms.ToTensor(),
-            ])
-            target_tensor = transform(target_img) * 255 # (3, 512, 512)
-            
-            # Check if any frame meets memorization criteria
-            # video: (1, 3, 16, 512, 512) target_tensor: (3, 512, 512)
-            minmse = float('inf')
-            for f in range(video.shape[1]):
-                frame_tensor = video[0, :, f]
-                mse = F.mse_loss(frame_tensor, target_tensor)
-                minmse = min(float(minmse), float(mse))
-                if mse.item() < MSE_MEM_THRESHOLD:
-                    label = 1
-                    break
+                # Check if target image exists
+                target_glob = os.path.join(TARGET_ROOT, args.mem_type.lower(), f"{i:04d}_*.png")
+                target_files = glob.glob(target_glob)
+                if not target_files:
+                    continue
                     
-            max_ssim = 0
-            for f in range(video.shape[1]):
-                frame = video[0, :, f]  # (3, 512, 512)
-                frame_np = frame.permute(1, 2, 0).cpu().numpy() # (512, 512, 3)
-                # Make sure it's in the right format for PIL (uint8 for normal images)
-                if frame_np.dtype != np.uint8:
-                    if frame_np.max() <= 1.0:
-                        frame_np = (frame_np * 255).astype(np.uint8)
-                    else:
-                        frame_np = frame_np.astype(np.uint8)
-                frame_pil = Image.fromarray(frame_np)
-                frame_pil_resized = frame_pil.resize(target_img.size, Image.BILINEAR)
+                print(f"Processing memorized prompt ({prompt})")
                 
-                # Evaluate SSIM in np uint8 space
-                frame_np = np.array(frame_pil_resized)
-                ssim_val = ssim(np.array(target_img), frame_np, multichannel=True, channel_axis=-1, data_range=255)
-                max_ssim = max(max_ssim, ssim_val)
-                if ssim_val > SSIM_MEM_THRESHOLD:
-                    label = 1
-                    break
-            
-            # Calculate noise norms
-            noise_norms = [diff.norm(p=2).item() for diff in sample.noise_diff] if hasattr(sample, 'noise_diff') else []
-            
-            # Save outputs in mem directory
-            output_dir = os.path.join(savedir, "mem", "mse")
-            
-            # Save trajectory data
-            traj_path = os.path.join(output_dir, f"{i:04d}_{label}_mse{minmse:.4f}_{safe_prompt}_traj.json")
-            with open(traj_path, 'w') as f:
-                json.dump({
-                    "prompt": prompt,
-                    "index": i,
-                    "label": label,
-                    "memorized": int(label),
-                    "mse_xt": mse_xt,
-                    "mse_pred_x0": mse_pred_x0,
-                    "noise_diff_norms": noise_norms,
-                    "max_ssim": max_ssim,
-                    "min_mse": float(minmse)
-                }, f, indent=2)
-            
-            # Store curves for plotting
-            mem_curves[f"xt_{label}"].append(mse_xt)
-            mem_curves[f"x0_{label}"].append(mse_pred_x0)
-            mem_curves[f"diff_{label}"].append([a - b for a, b in zip(mse_xt, mse_pred_x0)] if mse_xt and mse_pred_x0 else [])
-            mem_curves[f"noise_{label}"].append(noise_norms)
-            
-            # Save concatenated image (target + video frames)
-            vid_np = video[0].cpu().numpy()  # Shape (3, 16, 512, 512)
-            vid_np = np.transpose(vid_np, (1, 2, 3, 0))
-            target_np = target_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()  # Shape (512, 512, 3)
-            frames_list = [target_np]
-            for f in range(vid_np.shape[0]):  # Iterate through 16 frames
-                frame = vid_np[f, :, :]  # Shape (512, 512, 3)
-                frames_list.append(frame_np)
-            
-            [print(frame.shape) for frame in frames_list]
-
-            if frames_list[0].shape != frames_list[1].shape:
-                print(f"Reshaping target from {frames_list[0].shape} to match {frames_list[1].shape}")
-                target_pil = Image.fromarray(frames_list[0].astype(np.uint8))
-                target_resized = target_pil.resize((frames_list[1].shape[1], frames_list[1].shape[0]), Image.BILINEAR)
-                frames_list[0] = np.array(target_resized)
-
-            frames_list = [frame.astype(np.uint8) for frame in frames_list]
-            final_img = np.concatenate(frames_list, axis=1)  # Concatenate along width
-            output_img_path = os.path.join(output_dir, f"{i:04d}_{label}_mse{minmse:.4f}_{safe_prompt}.png")
-            Image.fromarray(final_img).save(output_img_path)
-
-            # Create noise norm plot
-            plt.figure(figsize=(10, 5))
-            plt.plot(noise_norms, label='tc-uc noise norms')
-            plt.xlabel("Denoising Step")
-            plt.ylabel("Noise Norm")
-            plt.title("Classifier-Free Guidance Noise Norms")
-            plt.legend()
-            noise_norm_plot_path = os.path.join(output_dir, f"{i:04d}_{label}_mse{minmse:.4f}_{safe_prompt}_noise_norm_plot.png")
-            plt.savefig(noise_norm_plot_path)
-            plt.close()
+                # Generate the video
+                sample = pipeline(
+                    prompt,
+                    negative_prompt="",
+                    num_inference_steps=model_config.steps,
+                    guidance_scale=model_config.guidance_scale,
+                    width=model_config.W,
+                    height=model_config.H,
+                    video_length=model_config.L,
+                    generator=torch.Generator(device="cuda").manual_seed(2025),
+                )
+                
+                video = sample.videos
+                mse_xt = sample.mse_xt if hasattr(sample, 'mse_xt') else []
+                mse_pred_x0 = sample.mse_pred_x0 if hasattr(sample, 'mse_pred_x0') else []
+                
+                # Compare to target image
+                label = 0
+                target_img = Image.open(target_files[0]).convert("RGB")
+                transform = transforms.Compose([
+                    transforms.Resize((video.shape[-1], video.shape[-2])),
+                    transforms.ToTensor(),
+                ])
+                target_tensor = transform(target_img) * 255 # (3, 512, 512)
+                
+                # Check if any frame meets memorization criteria
+                # video: (1, 3, 16, 512, 512) target_tensor: (3, 512, 512)
+                minmse = float('inf')
+                for f in range(video.shape[1]):
+                    frame_tensor = video[0, :, f]
+                    mse = F.mse_loss(frame_tensor, target_tensor)
+                    minmse = min(float(minmse), float(mse))
+                    if mse.item() < MSE_MEM_THRESHOLD:
+                        label = 1
+                        break
                         
-            # Save the video
-            video_output_path = os.path.join(savedir, "mem", "mp4", f'{safe_prompt}.mp4')
-            imageio.mimwrite(video_output_path, vid_np, fps=8, quality=9)
-            
-            # Log to wandb if enabled
-            if args.use_wandb:
-                wandb.log({
-                    f"{i:04d}_{label}_mse{minmse:.4f}_{safe_prompt}_img": wandb.Image(output_img_path, caption=f"Label: {label}"),
-                    f"{i:04d}_{label}_mse{minmse:.4f}_{safe_prompt}_noise_norm_plot": wandb.Image(noise_norm_plot_path)
-                })
-            
-            # Standard output for original script
-            short_prompt = "-".join((prompt.replace("/", "").split(" ")[:10]))
-            save_videos_grid(video, f"{savedir}/sample/{i}-{short_prompt}.gif")
-            print(f"Save to {savedir}/sample/{i}-{short_prompt}.gif")
+                max_ssim = 0
+                for f in range(video.shape[1]):
+                    frame = video[0, :, f]  # (3, 512, 512)
+                    frame_np = frame.permute(1, 2, 0).cpu().numpy() # (512, 512, 3)
+                    # Make sure it's in the right format for PIL (uint8 for normal images)
+                    if frame_np.dtype != np.uint8:
+                        if frame_np.max() <= 1.0:
+                            frame_np = (frame_np * 255).astype(np.uint8)
+                        else:
+                            frame_np = frame_np.astype(np.uint8)
+                    frame_pil = Image.fromarray(frame_np)
+                    frame_pil_resized = frame_pil.resize(target_img.size, Image.BILINEAR)
+                    
+                    # Evaluate SSIM in np uint8 space
+                    frame_np = np.array(frame_pil_resized)
+                    ssim_val = ssim(np.array(target_img), frame_np, multichannel=True, channel_axis=-1, data_range=255)
+                    max_ssim = max(max_ssim, ssim_val)
+                    if ssim_val > SSIM_MEM_THRESHOLD:
+                        label = 1
+                        break
+                
+                # Calculate noise norms
+                noise_norms = [diff.norm(p=2).item() for diff in sample.noise_diff] if hasattr(sample, 'noise_diff') else []
+                
+                # Save outputs in mem directory
+                output_dir = os.path.join(savedir, "laion")
+                
+                # Save trajectory data
+                traj_path = os.path.join(output_dir, f"{i:04d}_{seed}_{label}_ssim{max_ssim:.4f}_{safe_prompt}_traj.json")
+                with open(traj_path, 'w') as f:
+                    json.dump({
+                        "prompt": prompt,
+                        "index": i,
+                        "memorized": int(label),
+                        "mse_xt": mse_xt,
+                        "mse_pred_x0": mse_pred_x0,
+                        "noise_diff_norms": noise_norms,
+                        "max_ssim": max_ssim,
+                        "min_mse": float(minmse)
+                    }, f, indent=2)
+                
+                # Store curves for plotting
+                mem_curves[f"xt_{label}"].append(mse_xt)
+                mem_curves[f"x0_{label}"].append(mse_pred_x0)
+                mem_curves[f"diff_{label}"].append([a - b for a, b in zip(mse_xt, mse_pred_x0)] if mse_xt and mse_pred_x0 else [])
+                mem_curves[f"noise_{label}"].append(noise_norms)
+                
+                # Save concatenated image (target + video frames)
+                vid_np = video[0].cpu().numpy()  # Shape (3, 16, 512, 512)
+                vid_np = np.transpose(vid_np, (1, 2, 3, 0))
+                target_np = target_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()  # Shape (512, 512, 3)
+                frames_list = [target_np]
+                for f in range(vid_np.shape[0]):  # Iterate through 16 frames
+                    frame = vid_np[f, :, :]  # Shape (512, 512, 3)
+                    frames_list.append(frame_np)
+                
+                [print(frame.shape) for frame in frames_list]
+
+                if frames_list[0].shape != frames_list[1].shape:
+                    print(f"Reshaping target from {frames_list[0].shape} to match {frames_list[1].shape}")
+                    target_pil = Image.fromarray(frames_list[0].astype(np.uint8))
+                    target_resized = target_pil.resize((frames_list[1].shape[1], frames_list[1].shape[0]), Image.BILINEAR)
+                    frames_list[0] = np.array(target_resized)
+
+                frames_list = [frame.astype(np.uint8) for frame in frames_list]
+                final_img = np.concatenate(frames_list, axis=1)  # Concatenate along width
+                output_img_path = os.path.join(output_dir, f"{i:04d}_{seed}_{label}_ssim{max_ssim:.4f}_{safe_prompt}.png")
+                Image.fromarray(final_img).save(output_img_path)
+
+                # Create noise norm plot
+                plt.figure(figsize=(10, 5))
+                plt.plot(noise_norms, label='tc-uc noise norms')
+                plt.xlabel("Denoising Step")
+                plt.ylabel("Noise Norm")
+                plt.title("Classifier-Free Guidance Noise Norms")
+                plt.legend()
+                noise_norm_plot_path = os.path.join(output_dir, f"{i:04d}_{seed}_{label}_ssim{max_ssim:.4f}_{safe_prompt}_noise_norm_plot.png")
+                plt.savefig(noise_norm_plot_path)
+                plt.close()
+                            
+                # Save the video
+                video_output_path = os.path.join(savedir, "laion", f'{safe_prompt}.mp4')
+                imageio.mimwrite(video_output_path, vid_np, fps=8, quality=9)
+                
+                # Log to wandb if enabled
+                if args.use_wandb:
+                    wandb.log({
+                        f"{i:04d}_{seed}_{label}_ssim{max_ssim:.4f}_{safe_prompt}_img": wandb.Image(output_img_path, caption=f"Label: {label}"),
+                        f"{i:04d}_{seed}_{label}_ssim{max_ssim:.4f}_{safe_prompt}_noise_norm_plot": wandb.Image(noise_norm_plot_path)
+                    })
+                
+                # Standard output for original script
+                short_prompt = "-".join((prompt.replace("/", "").split(" ")[:10]))
+                save_videos_grid(video, f"{savedir}/{i:04d}-{short_prompt}.gif")
+                print(f"Save to {savedir}/{i:04d}-{short_prompt}.gif")
 
 
 def create_aggregate_plots(savedir, curves, args):

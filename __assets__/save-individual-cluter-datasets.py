@@ -161,7 +161,8 @@ def process_cluster(cluster_idx, cluster_key, cluster_captions, dataset, min_clu
         print(f"Warning: Cluster {cluster_key} resulted in an empty dataset. Skipping...")
         return None
 
-    save_folder_name = f"{OUTPUT_FOLDER}/filtered_webvid_dataset_{(cluster_idx+1):06d}_{re.sub(r'\W+', '_', first_caption.strip()[:30])}"
+    safe_prompt = re.sub(r'\W+', '_', first_caption.strip()[:30])
+    save_folder_name = f"{OUTPUT_FOLDER}/filtered_webvid_dataset_{(cluster_idx+1):06d}_{safe_prompt}"
     filtered_dataset.save_to_disk(save_folder_name)
 
     row = {
@@ -173,13 +174,14 @@ def process_cluster(cluster_idx, cluster_key, cluster_captions, dataset, min_clu
         "variance_embedding": variance_embedding.tolist() if variance_embedding is not None else None,
         "processing_time_seconds": processing_time,
         "output_folder": save_folder_name,
+        "diversity_score": float(np.mean(variance_embedding)*1e5) if variance_embedding is not None else None,
     }
     pprint({key: value for key, value in row.items() if key not in {"mean_embedding", "variance_embedding"}})
-    print("Intra-cluster visual variance", np.mean(row["variance_embedding"]))
+    print("Intra-cluster visual variance", row["diversity_score"] if row["diversity_score"] else "N/A")
 
-    pickle_file_path = os.path.join(save_folder_name, "metadata.pkl")
-    with open(pickle_file_path, "wb") as pickle_file:
-        pickle.dump(row, pickle_file)
+    json_file_path = os.path.join(save_folder_name, "metadata.json")
+    with open(json_file_path, "w") as json_file:
+        json.dump(row, json_file, indent=2)
         
     for idx, video in enumerate(filtered_dataset):
         if idx >= 25: break
@@ -206,8 +208,8 @@ def main():
 
     try:
         for cluster_idx, (cluster_key, cluster_captions) in enumerate(clusters.items()):
-            if cluster_idx < 2552 or any(row["cluster_key"] == cluster_key for row in processed_data):
-                continue  # Skip already processed clusters
+            # if cluster_idx < 2552 or any(row["cluster_key"] == cluster_key for row in processed_data):
+            #     continue  # Skip already processed clusters
 
             result = process_cluster(cluster_idx, cluster_key, cluster_captions, dataset)
             if result:

@@ -135,7 +135,7 @@ def main(
     local_rank      = init_dist(launcher=launcher)
     global_rank     = dist.get_rank()
     num_processes   = dist.get_world_size()
-    is_main_process = global_rank == 0
+    is_main_process = True # global_rank == 0
 
     seed = global_seed + global_rank
     torch.manual_seed(seed)
@@ -156,15 +156,7 @@ def main(
     )
 
     if is_main_process and (not is_debug) and use_wandb:
-        run = wandb.init(project="animatediff-photorealistic50x", name=folder_name, config=config)
-
-    # Handle the output folder creation
-    if is_main_process:
-        os.makedirs(output_dir, exist_ok=True)
-        os.makedirs(f"{output_dir}/samples", exist_ok=True)
-        os.makedirs(f"{output_dir}/sanity_check", exist_ok=True)
-        os.makedirs(f"{output_dir}/checkpoints", exist_ok=True)
-        OmegaConf.save(config, os.path.join(output_dir, 'config.yaml'))
+        run = wandb.init(project="animatediff", name=folder_name, config=config)
 
     # Initialize LPIPS model
     lpips_model = lpips.LPIPS(net='alex').eval().to(local_rank)
@@ -289,7 +281,7 @@ def main(
 
     if is_main_process and (not is_debug) and use_wandb:
         wandb.config.update({
-            "video_folders": os.listdir(train_dataset.video_folders),
+            "video_folders": os.listdir(train_dataset.video_folder),
             "num_samples": len(train_dataset),
         })
 
@@ -350,14 +342,19 @@ def main(
     # Train!
     total_batch_size = train_batch_size * num_processes * gradient_accumulation_steps
 
-    if is_main_process:
-        logging.info("***** Running training *****")
-        logging.info(f"  Num examples = {len(train_dataset)}")
-        logging.info(f"  Num Epochs = {num_train_epochs}")
-        logging.info(f"  Instantaneous batch size per device = {train_batch_size}")
-        logging.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-        logging.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
-        logging.info(f"  Total optimization steps = {max_train_steps}")
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(f"{output_dir}/samples", exist_ok=True)
+    os.makedirs(f"{output_dir}/sanity_check", exist_ok=True)
+    os.makedirs(f"{output_dir}/checkpoints", exist_ok=True)
+    OmegaConf.save(config, os.path.join(output_dir, 'config.yaml'))
+
+    logging.info("***** Running training *****")
+    logging.info(f"  Num examples = {len(train_dataset)}")
+    logging.info(f"  Num Epochs = {num_train_epochs}")
+    logging.info(f"  Instantaneous batch size per device = {train_batch_size}")
+    logging.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    logging.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
+    logging.info(f"  Total optimization steps = {max_train_steps}")
     global_step = unet_checkpoint_path['global_step'] if "global_step" in unet_checkpoint_path else 0
     first_epoch = 0
     
@@ -382,6 +379,7 @@ def main(
                 if not image_finetune:
                     pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
                     for idx, (pixel_value, text) in enumerate(zip(pixel_values, texts)):
+                        if idx > 10: break
                         pixel_value = pixel_value[None, ...]
                         save_videos_grid(pixel_value, f"{output_dir}/sanity_check/{'-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_rank}-{idx}'}.gif", rescale=True)
                 else:
@@ -495,13 +493,13 @@ def main(
                 ############################################################
                 # Examine transferred memorisation from SD
                 ############################################################
-                sdv1_bb_edge = load_dataset("/home/ubuntu/video/AnimateDiff/__assets__/one-step-extraction/", data_files={'train': 'sdv1_bb_edge_groundtruth.parquet',})
-                sdv1_wb = load_dataset("/home/ubuntu/video/AnimateDiff/__assets__/one-step-extraction/", data_files={'train': 'sdv1_wb_groundtruth.parquet',})
+                sdv1_bb_edge = load_dataset("../one-step-extraction/", data_files={'train': 'sdv1_bb_edge_groundtruth.parquet',})
+                # sdv1_wb = load_dataset("../one-step-extraction/", data_files={'train': 'sdv1_wb_groundtruth.parquet',})
                 seen_captions = set()
                 filtered_samples = []
 
                 # Iterate through both datasets
-                for dataset in [sdv1_bb_edge['train'], sdv1_wb['train']]:
+                for dataset in [sdv1_bb_edge['train'], ]:
                     for sample in dataset:
                         caption = sample['caption']
                         if caption not in seen_captions and sample['overfit_type'] == 'MV':
@@ -515,7 +513,7 @@ def main(
                     if ref_pil_image is None: continue
                         
                     prompt = sample['caption']
-                    if True:
+                    if not image_finetune:
                         sample = validation_pipeline(
                             prompt,
                             generator    = generator,
@@ -572,15 +570,82 @@ def main(
                             }, step=global_step)
                             
                         print(f"SD Prompt: {prompt}, LPIPS: {max_lpips:.4f}, ResNet: {max_resnet_similarity:.4f}, CLIP: {max_clip_similarity:.4f}")
+                    
+                    else:
+                        # Handle image_finetune case with StableDiffusionPipeline
+                        pipeline_output = validation_pipeline(
+                            prompt,
+                            generator=generator,
+                            height=height,
+                            width=width,
+                            **validation_data,
+                        )
+                        
+                        # Extract images from StableDiffusionPipelineOutput
+                        generated_images = pipeline_output.images  # List of PIL.Image objects
+                        
+                        fn = re.sub(r'\W', '_', prompt)
+                        
+                        # Convert PIL images to tensor for concatenation and saving
+                        # Create a fake time dimension to reuse existing logic
+                        image_tensors = []
+                        for img in generated_images:
+                            img_tensor = torchvision.transforms.ToTensor()(img)
+                            image_tensors.append(img_tensor)
+                        
+                        # Stack images along a new time dimension (treating multiple images as frames)
+                        if len(image_tensors) == 1:
+                            # If only one image, duplicate it to create a fake time dimension
+                            image_tensors = [image_tensors[0]] * train_data.get('sample_n_frames', 8)
+                        
+                        # Stack to create CTHW format (like video frames)
+                        stacked_images = torch.stack(image_tensors, dim=1)  # Shape: [C, T, H, W]
+                        stacked_images = stacked_images.unsqueeze(0)  # Add batch dimension: [1, C, T, H, W]
+                        
+                        # Save using existing video saving logic
+                        save_videos_grid(stacked_images, f"{output_dir}/samples/sample-{global_step}/sd_{idx}_{fn}.gif")
+                        sd_samples.append(stacked_images)
+                        
+                        # Convert to PIL images for similarity calculations (use first image)
+                        generated_image_pil = generated_images[0]
+                        
+                        # LPIPS similarity (single image comparison)
+                        ref_tensor = lpips_preprocess(ref_pil_image).unsqueeze(0).to(local_rank)
+                        gen_tensor = lpips_preprocess(generated_image_pil).unsqueeze(0).to(local_rank)
+                        lpips_score = lpips_model(ref_tensor, gen_tensor).item()
+
+                        # ResNet feature similarity (single image comparison)
+                        # ref_features = extract_resnet_features([ref_pil_image])
+                        # gen_features = extract_resnet_features([generated_image_pil])
+                        # resnet_similarity = F.cosine_similarity(ref_features, gen_features, dim=-1).item()
+
+                        # CLIP feature similarity (single image comparison)
+                        ref_clip_features = extract_clip_features([ref_pil_image])
+                        gen_clip_features = extract_clip_features([generated_image_pil])
+                        clip_similarity = F.cosine_similarity(ref_clip_features, gen_clip_features, dim=-1).item()
+
+                        # Convert generated image to numpy for wandb logging
+                        gen_image_np = np.array(generated_image_pil)
+
+                        if use_wandb:
+                            wandb.log({
+                                f"clip_sim/sd_{idx}_{fn}": clip_similarity,
+                                # f"res_sim/sd_{idx}_{fn}": resnet_similarity,
+                                f"lpips/sd_{idx}_{fn}": lpips_score,
+                                f"generated_images/sd_{idx}_{fn}": wandb.Image(generated_image_pil, caption=prompt),
+                                f"reference_images/sd_{idx}_{fn}": wandb.Image(ref_pil_image, caption=prompt)
+                            }, step=global_step)
+                            
+                        print(f"SD Prompt: {prompt}, LPIPS: {lpips_score:.4f}, CLIP: {clip_similarity:.4f}")
                 
                 if not image_finetune:
                     sd_samples = torch.concat(sd_samples)
                     save_path = f"{output_dir}/samples/sd_sample-{global_step}.gif"
                     save_videos_grid(sd_samples, save_path)
                 else:
-                    sd_samples = torch.stack(sd_samples)
-                    save_path = f"{output_dir}/samples/sd_sample-{global_step}.png"
-                    torchvision.utils.save_image(sd_samples, save_path, nrow=4)
+                    sd_samples = torch.concat(sd_samples)
+                    save_path = f"{output_dir}/samples/sd_sample-{global_step}.gif"
+                    save_videos_grid(sd_samples, save_path)
                     
             if is_main_process and (global_step % (len(train_dataset)//2) == 0 or global_step in [1,]):   
                 print("#"*50, f"At Global Step {global_step} - Examine memorisation from WebVid10M")
@@ -677,16 +742,79 @@ def main(
                         print(f"WV Prompt: {prompt}, LPIPS: {max_lpips_wv:.4f}, ResNet: {max_resnet_similarity_wv:.4f}, CLIP: {max_clip_similarity_wv:.4f}")
 
                     else:
-                        pass
+                        # Handle image_finetune case for WebVid10M evaluation
+                        pipeline_output = validation_pipeline(
+                            prompt,
+                            generator=generator,
+                            height=height,
+                            width=width,
+                            **validation_data,
+                        )
+                        
+                        # Extract images from StableDiffusionPipelineOutput
+                        generated_images = pipeline_output.images  # List of PIL.Image objects
+                        generated_image_pil = generated_images[0]  # Use first generated image
+                        
+                        fn = re.sub(r'\W', '_', prompt)
+                        
+                        # Convert PIL images to tensor for concatenation and saving
+                        # Create a fake time dimension to reuse existing logic
+                        image_tensors = []
+                        for img in generated_images:
+                            img_tensor = torchvision.transforms.ToTensor()(img)
+                            image_tensors.append(img_tensor)
+                        
+                        # Stack images along a new time dimension (treating multiple images as frames)
+                        if len(image_tensors) == 1:
+                            # If only one image, duplicate it to create a fake time dimension
+                            image_tensors = [image_tensors[0]] * train_data.get('sample_n_frames', 8)
+                        
+                        # Stack to create CTHW format (like video frames)
+                        stacked_images = torch.stack(image_tensors, dim=1)  # Shape: [C, T, H, W]
+                        stacked_images = stacked_images.unsqueeze(0)  # Add batch dimension: [1, C, T, H, W]
+                        
+                        # Save using existing video saving logic
+                        save_videos_grid(stacked_images, f"{output_dir}/samples/sample-{global_step}/wv_{idx}_{fn}.gif")
+                        wv_samples.append(stacked_images)
+                        
+                        # For comparison, use the first reference frame as the reference image
+                        ref_image_pil = torchvision.transforms.ToPILImage()(torch.from_numpy(reference_visual[0]).permute(2, 0, 1))
+                        
+                        # LPIPS similarity (single image comparison)
+                        ref_tensor = lpips_preprocess(ref_image_pil).unsqueeze(0).to(local_rank)
+                        gen_tensor = lpips_preprocess(generated_image_pil).unsqueeze(0).to(local_rank)
+                        lpips_score_wv = lpips_model(ref_tensor, gen_tensor).item()
+
+                        # ResNet feature similarity (single image comparison)
+                        ref_features = extract_resnet_features([ref_image_pil])
+                        gen_features = extract_resnet_features([generated_image_pil])
+                        resnet_similarity_wv = F.cosine_similarity(ref_features, gen_features, dim=-1).item()
+
+                        # CLIP feature similarity (single image comparison)
+                        ref_clip_features = extract_clip_features([ref_image_pil])
+                        gen_clip_features = extract_clip_features([generated_image_pil])
+                        clip_similarity_wv = F.cosine_similarity(ref_clip_features, gen_clip_features, dim=-1).item()
+
+                        # Log results to wandb
+                        if use_wandb:
+                            wandb.log({
+                                f"clip_sim/wv_{idx}_{fn}": clip_similarity_wv,
+                                f"res_sim/wv_{idx}_{fn}": resnet_similarity_wv,
+                                f"lpips/wv_{idx}_{fn}": lpips_score_wv,
+                                f"generated_images/wv_{idx}_{fn}": wandb.Image(generated_image_pil, caption=prompt),
+                                f"reference_images/wv_{idx}_{fn}": wandb.Image(ref_image_pil, caption=prompt)
+                            }, step=global_step)
+
+                        print(f"WV Prompt: {prompt}, LPIPS: {lpips_score_wv:.4f}, ResNet: {resnet_similarity_wv:.4f}, CLIP: {clip_similarity_wv:.4f}")
 
                 if not image_finetune:
                     wvsamples = torch.cat(wv_samples)
                     save_path = f"{output_dir}/samples/wvsample-{global_step}.gif"
                     save_videos_grid(wvsamples, save_path)
                 else:
-                    wvsamples = torch.stack(wv_samples)
-                    save_path = f"{output_dir}/samples/wvsample-{global_step}.png"
-                    torchvision.utils.save_image(wvsamples, save_path, nrow=4)
+                    wvsamples = torch.cat(wv_samples)
+                    save_path = f"{output_dir}/samples/wvsample-{global_step}.gif"
+                    save_videos_grid(wvsamples, save_path)
                 logging.info(f"Saved samples to {save_path}")
 
                 

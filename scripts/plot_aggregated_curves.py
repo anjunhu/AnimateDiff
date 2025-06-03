@@ -10,6 +10,7 @@ from scipy.spatial import distance
 import tempfile
 import difflib
 import argparse
+from sklearn.metrics import roc_curve, auc, roc_auc_score, precision_recall_curve
 
 def extract_info_from_filename(filename):
     """Extract index and prompt information from filename."""
@@ -97,6 +98,263 @@ def update_memorization_status(json_file, status):
 
 
 
+
+def calculate_rocauc(inputs):
+    """Calculate ROCAUC for average noise norm vs memorization status."""
+    json_files = inputs 
+    
+    # Store the average norms and their memorization labels
+    avg_norms = []
+    labels = []
+    dataset_info = []  # Store which dataset each sample belongs to
+    
+    for json_file in json_files:
+        try:
+            data = load_json_data(json_file)
+            
+            # Check which noise norm field to use
+            norm_field = "text_noise_norms"
+            if "noise_diff_norms" in data:
+                norm_field = "noise_diff_norms"  # Use this if available
+            
+            # Skip if no noise norms or not labeled
+            if norm_field not in data or "memorized" not in data:
+                continue
+                
+            # Calculate the average norm across timesteps
+            avg_norm = np.mean(data[norm_field])
+            avg_norms.append(avg_norm)
+            labels.append(1 if data["memorized"] else 0)
+            
+            # Determine dataset
+            if "objaverse" in str(json_file):
+                dataset = "Objaverse"
+            else:
+                dataset = "LAION"
+            dataset_info.append(dataset)
+                
+        except (KeyError, FileNotFoundError) as e:
+            print(f"Error processing {json_file}: {e}")
+            continue
+    
+    if not avg_norms or not labels:
+        return None, None, None, None, None
+    
+    # Calculate overall ROCAUC
+    fpr, tpr, thresholds = roc_curve(labels, avg_norms)
+    roc_auc = auc(fpr, tpr)
+    
+    # Find the optimal threshold using Youden's J statistic (maximizing sensitivity + specificity - 1)
+    j_scores = tpr - fpr
+    best_idx = np.argmax(j_scores)
+    optimal_threshold = thresholds[best_idx]
+    
+    # Calculate dataset-specific ROCAUCs
+    dataset_results = {}
+    for dataset_name in set(dataset_info):
+        # Skip if it's just non-memorized samples (they're all treated the same)
+        if sum(1 for i, l in enumerate(labels) if l == 1 and dataset_info[i] == dataset_name) == 0:
+            continue
+            
+        # For each dataset, we compare memorized samples from this dataset vs all non-memorized
+        dataset_labels = []
+        dataset_norms = []
+        
+        for i, (norm, label) in enumerate(zip(avg_norms, labels)):
+            # Include all non-memorized samples (label=0) regardless of dataset
+            # For memorized samples (label=1), only include those from this dataset
+            if label == 0 or (label == 1 and dataset_info[i] == dataset_name):
+                dataset_labels.append(label)
+                dataset_norms.append(norm)
+                
+        # Calculate ROCAUC for this dataset
+        try:
+            ds_fpr, ds_tpr, ds_thresholds = roc_curve(dataset_labels, dataset_norms)
+            ds_roc_auc = auc(ds_fpr, ds_tpr)
+            
+            # Find optimal threshold
+            ds_j_scores = ds_tpr - ds_fpr
+            ds_best_idx = np.argmax(ds_j_scores)
+            ds_optimal_threshold = ds_thresholds[ds_best_idx]
+            
+            dataset_results[dataset_name] = {
+                'auc': ds_roc_auc,
+                'fpr': ds_fpr,
+                'tpr': ds_tpr,
+                'threshold': ds_optimal_threshold
+            }
+        except Exception as e:
+            print(f"Error calculating ROCAUC for {dataset_name}: {e}")
+    
+    return roc_auc, fpr, tpr, optimal_threshold, dataset_results
+
+def plot_roc_curve(fpr, tpr, roc_auc, output_file="roc_curve.png", dataset_results=None):
+    """Create and save ROC curve plot with per-dataset breakdowns."""
+    plt.figure(figsize=(10, 8))
+    
+    # Plot overall ROC curve
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'Overall ROC (AUC = {roc_auc:.3f})')
+    
+    # Plot per-dataset ROC curves if available
+    if dataset_results:
+        colors = {'LAION': 'red', 'Objaverse': 'black'}
+        for dataset_name, result in dataset_results.items():
+            plt.plot(
+                result['fpr'], 
+                result['tpr'], 
+                color=colors.get(dataset_name, 'purple'), 
+                lw=1.5, 
+                linestyle='-',
+                label=f'{dataset_name} ROC (AUC = {result["auc"]:.3f})'
+            )
+    
+    # Plot diagonal reference line
+    plt.plot([0, 1], [0, 1], color='navy', lw=1.5, linestyle='--')
+    
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('AnimateDiff - ROC Curves: Average Noise Norm as Memorization Predictor')
+    plt.legend(loc="lower right")
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(output_file)
+    plt.close()
+    return output_file
+
+def plot_score_distributions(inputs, optimal_threshold=None, output_file="score_distribution.png"):
+    """Plot distributions of average noise norms for memorized vs non-memorized samples."""
+    json_files = inputs[:700]
+    
+    # Separate scores by dataset and memorization status
+    objaverse_memorized_scores = []
+    laion_memorized_scores = []
+    not_memorized_scores = []  # All non-memorized (combined across all datasets)
+    
+    for json_file in json_files:
+        try:
+            data = load_json_data(json_file)
+            is_objaverse = "objaverse" in str(json_file)
+            
+            # Check which norm field to use
+            norm_field = "text_noise_norms"
+            if "noise_diff_norms" in data:
+                norm_field = "noise_diff_norms"  # Use this if available
+            
+            # Skip if no noise norms or not labeled
+            if norm_field not in data or "memorized" not in data:
+                continue
+                
+            # Calculate the average norm across timesteps
+            avg_norm = np.mean(data[norm_field])
+            
+            # Group all non-memorized samples together, regardless of dataset
+            if not data["memorized"]:
+                not_memorized_scores.append(avg_norm)
+            else:
+                # For memorized samples, maintain dataset distinction
+                if is_objaverse:
+                    objaverse_memorized_scores.append(avg_norm)
+                else:
+                    laion_memorized_scores.append(avg_norm)
+                
+        except (KeyError, FileNotFoundError):
+            continue
+    
+    if not (objaverse_memorized_scores or laion_memorized_scores) and not not_memorized_scores:
+        return None
+    
+    plt.figure(figsize=(10, 6))
+    
+    # Plot histograms
+    max_value = max(
+        max(objaverse_memorized_scores, default=0),
+        max(laion_memorized_scores, default=0),
+        max(not_memorized_scores, default=0)
+    ) + 10
+    bins = np.linspace(0, max_value, 30)
+    
+    # Plot all non-memorized samples together
+    plt.hist(not_memorized_scores, bins=bins, alpha=0.5, label=f'Not Memorized (n={len(not_memorized_scores)})', color='green')
+    
+    # Plot memorized samples by dataset
+    if laion_memorized_scores:
+        plt.hist(laion_memorized_scores, bins=bins, alpha=0.5, label=f'LAION Memorized (n={len(laion_memorized_scores)})', color='red')
+    if objaverse_memorized_scores:
+        plt.hist(objaverse_memorized_scores, bins=bins, alpha=0.5, label=f'Objaverse Memorized (n={len(objaverse_memorized_scores)})', color='black')
+    
+    # Add vertical line for optimal threshold if provided
+    if optimal_threshold is not None:
+        plt.axvline(x=optimal_threshold, color='blue', linestyle='--', 
+                   label=f'Optimal Threshold: {optimal_threshold:.2f}')
+    
+    plt.xlabel('Average Noise Norm')
+    plt.ylabel('Frequency')
+    plt.title('AnimateDiff - Distribution of Average Noise Norms by Memorization Status')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(output_file)
+    plt.close()
+    
+    return output_file
+
+def plot_precision_recall_curve(inputs, output_file="precision_recall.png"):
+    """Create and save precision-recall curve."""
+    json_files = inputs[:700]
+    
+    # Store the average norms and their memorization labels
+    avg_norms = []
+    labels = []
+    
+    for json_file in json_files:
+        try:
+            data = load_json_data(json_file)
+            
+            # Check which norm field to use
+            norm_field = "text_noise_norms"
+            if "noise_diff_norms" in data:
+                norm_field = "noise_diff_norms"
+                
+            # Skip if no noise norms or not labeled
+            if norm_field not in data or "memorized" not in data:
+                continue
+                
+            # Calculate the average norm across timesteps
+            avg_norm = np.mean(data[norm_field])
+            avg_norms.append(avg_norm)
+            labels.append(1 if data["memorized"] else 0)
+                
+        except (KeyError, FileNotFoundError):
+            continue
+    
+    if not avg_norms or not labels or len(set(labels)) < 2:
+        return None
+    
+    # Calculate precision-recall curve
+    precision, recall, thresholds = precision_recall_curve(labels, avg_norms)
+    
+    # Plot precision-recall curve
+    plt.figure(figsize=(10, 8))
+    plt.plot(recall, precision, color='blue', lw=2)
+    
+    # Add labels and title
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.title('AnimateDiff - Precision-Recall Curve')
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    
+    # Save the plot
+    plt.savefig(output_file)
+    plt.close()
+    
+    return output_file
+
+
+
+
 def create_aggregated_plot(inputs, output_file="aggregated_plot.png"):
     json_files = inputs[:700]
     
@@ -112,7 +370,7 @@ def create_aggregated_plot(inputs, output_file="aggregated_plot.png"):
     for json_file in json_files:
         try:
             data = load_json_data(json_file)
-            is_second_stage = not "sd-transfer" in str(json_file)
+            is_second_stage = "clusters" in str(json_file)
             
             if "memorized" in data:
                 labeled_count += 1
@@ -159,23 +417,23 @@ def create_aggregated_plot(inputs, output_file="aggregated_plot.png"):
 
         # LAION not memorized (green)
         if standard_not_memorized_norms:
-            line = plt.plot(timesteps, standard_not_memorized_norms[0], color="green", alpha=0.2, linewidth=1)[0]
+            line = plt.plot(timesteps, standard_not_memorized_norms[0], color="green", alpha=0.1, linewidth=1)[0]
             for traj in standard_not_memorized_norms[1:]:
-                plt.plot(timesteps, traj, color="green", alpha=0.2, linewidth=1)
+                plt.plot(timesteps, traj, color="green", alpha=0.1, linewidth=1)
             legend_handles.append((line, f"LAION Not Memorized (green)"))
         
         # WebVid10M not memorized (green)
         if second_stage_not_memorized_norms:
-            line = plt.plot(timesteps, second_stage_not_memorized_norms[0], color="green", alpha=0.01, linewidth=1)[0]
+            line = plt.plot(timesteps, second_stage_not_memorized_norms[0], color="green", alpha=0.1, linewidth=1)[0]
             for traj in second_stage_not_memorized_norms[1:]:
-                plt.plot(timesteps, traj, color="green", alpha=0.01, linewidth=1)
+                plt.plot(timesteps, traj, color="green", alpha=0.1, linewidth=1)
             legend_handles.append((line, f"WebVid10M Not Memorized (green)"))
 
         # LAION memorized (red)
         if standard_memorized_norms:
-            line = plt.plot(timesteps, standard_memorized_norms[0], color="red", alpha=0.6, linewidth=1)[0]
+            line = plt.plot(timesteps, standard_memorized_norms[0], color="red", alpha=0.2, linewidth=1)[0]
             for traj in standard_memorized_norms[1:]:
-                plt.plot(timesteps, traj, color="red", alpha=0.6, linewidth=1)
+                plt.plot(timesteps, traj, color="red", alpha=0.2, linewidth=1)
             legend_handles.append((line, f"LAION Memorized (red, {len(standard_memorized_norms)})"))
 
         # WebVid10M memorized (black)
@@ -218,7 +476,32 @@ def create_aggregated_plot(inputs, output_file="aggregated_plot.png"):
     print(f"  - LAION Not Memorized: {len(standard_not_memorized_norms)}")
     print(f"Total: {labeled_count} labeled, {unlabeled_count} unlabeled")
     
-    return output_file
+    # Add ROC AUC analysis after aggregated plot
+    roc_auc, fpr, tpr, optimal_threshold, dataset_results = calculate_rocauc(inputs)
+    
+    # Create additional ROC analysis plots and export data
+    results = {}
+    
+    if roc_auc is not None:
+        # Create ROC curve plot
+        roc_plot_path = plot_roc_curve(fpr, tpr, roc_auc, 
+                                       output_file="roc_curve.png", 
+                                       dataset_results=dataset_results)
+        results["roc_plot"] = roc_plot_path
+        
+        # Create distribution plot
+        dist_plot_path = plot_score_distributions(inputs, optimal_threshold, 
+                                                 output_file="score_distribution.png")
+        results["distribution_plot"] = dist_plot_path
+        
+        # Generate precision-recall curve
+        if len(set([1 if data["memorized"] else 0 for data in 
+                   [load_json_data(file) for file in json_files if "memorized" in load_json_data(file)]])) > 1:
+            precision_recall_path = plot_precision_recall_curve(inputs, 
+                                                              output_file="precision_recall.png")
+            results["precision_recall_plot"] = precision_recall_path
+    
+    return output_file, roc_auc, optimal_threshold, results
 
 
 
@@ -398,7 +681,7 @@ def main():
     parser.add_argument("--port", "-d", type=int, default=7860, help="Port to run the app on")
     parser.add_argument("--output", "-o", type=str, default="aggregated_plot.png", help="Output file for the aggregated plot")
     parser.add_argument("--plot-only", action="store_true", help="Only generate the aggregated plot without launching the UI")
-    parser.add_argument("--no-3d", action="store_true", help="Disable 3D model display")
+    parser.add_argument("--no-3d", action="store_false", default=True, help="Disable 3D model display")
     
     args = parser.parse_args()
     
