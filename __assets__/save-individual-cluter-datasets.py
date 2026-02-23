@@ -1,6 +1,7 @@
 import os 
 import re
 import json
+import time
 import wandb
 import torch
 import ffmpeg
@@ -14,18 +15,31 @@ from datasets import Dataset, load_dataset
 from transformers import CLIPProcessor, CLIPModel
 from PIL import Image
 
+
+def retry_with_backoff(fn, max_retries=8, base_delay=10):
+    """Call fn(), retrying on exception with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"Rate limit / error: {e}. Retrying in {delay}s (attempt {attempt+1}/{max_retries})...")
+            time.sleep(delay)
+
 # Housekeeping
 OUTPUT_FOLDER = "filtered_webvid_datasets_UN0050_avgCLIPvar"
 PARTIAL_SAVE_FILE = os.path.join(OUTPUT_FOLDER, "partial_metadata.pkl")
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-OUTPUT_FILE = "./clusters-final.json"
+OUTPUT_FILE = "./clusters-10-500.json"
 with open(OUTPUT_FILE, "r") as f:
     clusters = json.load(f)
 
-# Load the WebVid-10M dataset
-dataset = load_dataset("TempoFunk/webvid-10M", split="train")
+# Load the WebVid-10M dataset in streaming mode to avoid downloading all shards
+dataset = retry_with_backoff(lambda: load_dataset("TempoFunk/webvid-10M", split="train", streaming=True))
 
 # Initialize the CLIP model and processor
 clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
@@ -138,16 +152,22 @@ def process_cluster(cluster_idx, cluster_key, cluster_captions, dataset, min_clu
         video_name = example["name"]
         return fuzz.ratio(video_name, first_caption) > 85
 
-    filtered_dataset = dataset.filter(filter_videos)
-    total_videos = len(filtered_dataset)
-    
+    # Streaming: collect up to min_cluster_size matches without downloading all shards
+    collected = []
+    for example in dataset.filter(filter_videos):
+        collected.append(example)
+        if len(collected) > min_cluster_size:
+            break
+
+    total_videos = len(collected)
+
     # Exclude clusters below the minimum size
     if total_videos < min_cluster_size:
         print(f"Skipping Cluster {cluster_key}: too few videos ({total_videos} < {min_cluster_size}).")
         return None
     print(f"Processing Cluster {cluster_key} of Size {total_videos}")
-    
-    filtered_dataset = filtered_dataset.select(range(min_cluster_size))
+
+    filtered_dataset = Dataset.from_list(collected[:min_cluster_size])
     print(f"We are only using {len(filtered_dataset)} from this cluster.")
     
     avg_caption_length = (
